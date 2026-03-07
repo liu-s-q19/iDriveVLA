@@ -22,3 +22,4 @@ temp/*
 task/
 logs/
 .codex/
+codebook_cache/agent_vocab_recluster*.pkl
