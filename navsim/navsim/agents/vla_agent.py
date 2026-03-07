@@ -139,14 +139,17 @@ class VlaAgent(AbstractAgent):
 
     def get_sensor_config(self) -> SensorConfig:
         """Inherited, see superclass."""
-        return SensorConfig(cam_f0=True, 
-                            cam_l0=True, 
-                            cam_l1=True, 
-                            cam_l2=True, 
-                            cam_r0=True, 
-                            cam_r1=True, 
-                            cam_r2=True,
-                            cam_b0=True, 
+        # Only load camera sensors for the 4 history frames (indices 0..3).
+        # This avoids touching future-frame images during preprocessing.
+        history_iters = [0, 1, 2, 3]
+        return SensorConfig(cam_f0=history_iters,
+                            cam_l0=history_iters,
+                            cam_l1=history_iters,
+                            cam_l2=history_iters,
+                            cam_r0=history_iters,
+                            cam_r1=history_iters,
+                            cam_r2=history_iters,
+                            cam_b0=history_iters,
                             lidar_pc=False)
 
     def get_target_builders(self) -> List[AbstractTargetBuilder]:

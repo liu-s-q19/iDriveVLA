@@ -14,7 +14,7 @@ lightning-utilities==0.14.2
 torchmetrics==1.7.0
 tensorboard
 tensorboard-data-server==0.7.2
-nuplan-devkit @ git+https://github.com/motional/nuplan-devkit@nuplan-devkit-v1.2
+# nuplan-devkit @ git+https://github.com/motional/nuplan-devkit@nuplan-devkit-v1.2
 casadi==3.6.7
 control==0.9.1
 pyquaternion==0.9.9

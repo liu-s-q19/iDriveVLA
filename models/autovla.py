@@ -234,6 +234,7 @@ class GRPOAutoVLA(pl.LightningModule):
             # Extract action tokens and trajectory (! batch size = 1)
             actions_tokens = completion_ids[0][completion_ids[0] >= self.action_start_id]
 
+            # Force a fixed-length rollout so PDMS expects the same horizon when scoring.
             if len(actions_tokens) > self.trajectory_sampling.num_poses:
                 actions_tokens = actions_tokens[:self.trajectory_sampling.num_poses]
             elif len(actions_tokens) < self.trajectory_sampling.num_poses:
@@ -348,7 +349,7 @@ class SFTAutoVLA(pl.LightningModule):
         action_mask = (labels_flat >= self.autovla.action_start_id)  # shape: (B*T,)
         # Compute token-wise cross-entropy loss
         ce_loss_all = F.cross_entropy(logits_flat, labels_flat, reduction='none')  # shape: (B*T,)
-        # Extract loss for action tokens
+        # Extract loss for action tokens (text-only positions keep the base LM loss).
         action_loss = ce_loss_all[action_mask]
         # Add to total loss with optional weighting factor
         if action_loss.numel() > 0:

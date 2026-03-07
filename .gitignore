@@ -19,3 +19,6 @@
 
 # temp
 temp/*
+task/
+logs/
+.codex/

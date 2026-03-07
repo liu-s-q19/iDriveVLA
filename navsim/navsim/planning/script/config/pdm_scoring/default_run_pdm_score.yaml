@@ -16,3 +16,11 @@ defaults:
   - override train_test_split: navtest
 
 metric_cache_path: ${oc.env:NAVSIM_EXP_ROOT}/metric_cache # path to metric cache
+trajectory_source: agent # agent | metric_cache
+
+quantization:
+  enable: false
+  codebook_path: null
+  device: cpu
+  agent_width: 2.0
+  agent_length: 4.8

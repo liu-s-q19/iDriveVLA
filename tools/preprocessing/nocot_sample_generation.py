@@ -8,8 +8,6 @@ from pytorch_lightning import seed_everything
 from transformers import AutoProcessor
 from torch.utils.data import DataLoader
 import shutil
-from dataset_utils.preprocessing.nuplan_dataset import NuplanCoTAnnotationDataset, DataCollator as NuplanDataCollator
-from dataset_utils.preprocessing.waymo_e2e_dataset import WaymoE2ECoTAnnotationDataset, DataCollator as WaymoDataCollator
 
 
 CAM_LIST = ['front', 'front_left', 'front_right', 
@@ -101,6 +99,7 @@ if __name__ == "__main__":
             print(f"Pre_generated_dir {args.pre_generated_dir} does not exist.")
 
     # Load configuration.
+    # Config names mirror files under config/, so keep only the stem in --config.
     config = load_config(f"./config/{args.config}.yaml")
     
     # Initialize the processor and dataset.
@@ -108,9 +107,20 @@ if __name__ == "__main__":
     dataset_name = config.get("dataset_name", "")
 
     if dataset_name == "nuplan":
+        # Navsim/nuPlan samples pull multi-camera frames and trajectories per scene token.
+        from dataset_utils.preprocessing.nuplan_dataset import (
+            NuplanCoTAnnotationDataset,
+            DataCollator as NuplanDataCollator,
+        )
+
         dataset = NuplanCoTAnnotationDataset(config, processor)
         collator = NuplanDataCollator(processor)
     elif dataset_name == "waymo":
+        from dataset_utils.preprocessing.waymo_e2e_dataset import (
+            WaymoE2ECoTAnnotationDataset,
+            DataCollator as WaymoDataCollator,
+        )
+
         dataset = WaymoE2ECoTAnnotationDataset(config, processor)
         collator = WaymoDataCollator(processor)
     else:
@@ -120,6 +130,7 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Use DataLoader to load samples concurrently.
+    # Iterate scene-by-scene so each JSON is one scenario; workers fan out IO-heavy navsim loads.
     data_loader = DataLoader(dataset, batch_size=1, num_workers=args.num_workers, 
                              collate_fn=collator, shuffle=True)
     
@@ -128,6 +139,7 @@ if __name__ == "__main__":
         sample = {key: batch[key][0] for key in batch}
         token, result = process_sample(sample, dataset_name)
         
+        # Skip tokens we already dumped to avoid clobbering manual/partial outputs.
         if token in pre_generated_tokens:
             continue
 

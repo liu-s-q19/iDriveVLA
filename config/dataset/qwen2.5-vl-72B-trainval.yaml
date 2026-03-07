@@ -1,0 +1,14 @@
+name: qwen2.5-vl-72B-trainval
+description: Preprocessing dataset for AutoVLA on Navsim trainval split (No-CoT)
+
+# model
+pretrained_model_path: /data/ckpt/Qwen/Qwen2___5-VL-72B-Instruct
+
+# training
+batch_size: 1
+num_workers: 32
+
+# dataset settings
+dataset_name: nuplan
+dataset_path: /data/dataset/navsim/placeholder/trainval
+scene_filter: /data/liushiqi/AutoVLA/navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtrain.yaml

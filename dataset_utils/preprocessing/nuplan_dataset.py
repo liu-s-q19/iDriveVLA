@@ -28,14 +28,20 @@ class NuplanCoTAnnotationDataset(Dataset):
         self.processor = processor
          
         if config['scene_filter'] is None:
-            scene_filter = SceneFilter(
+            self.scene_filter = SceneFilter(
                 num_history_frames=4, # number of past frames to be extracted, frames are at 2Hz
                 num_future_frames=10, # number of future frames to be extracted, frames are at 2Hz
                 frame_interval=4, # number of frames to skip between each scene, if null, extracted scenes are non-overlapping
             )
         else:
-            scene_filter: SceneFilter = instantiate(OmegaConf.load(config['scene_filter']))
+            self.scene_filter: SceneFilter = instantiate(OmegaConf.load(config['scene_filter']))
         
+        print("====== SceneFilter 检查 ======")
+        print(f"对象类型: {type(self.scene_filter)}")
+        print(f"历史帧数: {self.scene_filter.num_history_frames}")
+        print(f"未来帧数: {self.scene_filter.num_future_frames}")
+        print(f"帧间隔: {self.scene_filter.frame_interval}")
+        print("==============================")
         self.interval_length = 0.5
         trajectory_sampling = TrajectorySampling(time_horizon=5, interval_length=self.interval_length)
         self._agent = VlaAgent(trajectory_sampling=trajectory_sampling)
@@ -43,7 +49,7 @@ class NuplanCoTAnnotationDataset(Dataset):
         self._scene_loader = SceneLoader(
             data_path=Path(self.data_path.replace('placeholder', 'navsim_logs')),
             sensor_blobs_path=Path(self.data_path.replace('placeholder', 'sensor_blobs')),
-            scene_filter=scene_filter,
+            scene_filter=self.scene_filter,
             sensor_config=self._agent.get_sensor_config(),
         )
 
@@ -56,9 +62,22 @@ class NuplanCoTAnnotationDataset(Dataset):
         input_features: Dict[str, torch.Tensor] = {}
 
         scene = self._scene_loader.get_scene_from_token(self._scene_loader.tokens[idx])
-        agent_input = scene.get_agent_input()
-        for builder in self._agent.get_feature_builders():
-            input_features.update(builder.compute_features(agent_input))
+        try:
+            agent_input = scene.get_agent_input()
+            for builder in self._agent.get_feature_builders():
+                input_features.update(builder.compute_features(agent_input))
+        except FileNotFoundError as e:
+            # 精准捕获找不到文件的错误，打印出它到底在找哪张图
+            print(f"\n🚨 抓到报错了！")
+            print(f"Token: {self._scene_loader.tokens[idx]}")
+            print(f"它正在找但找不到的文件路径是: {e}")
+            print(f"--------------------------------------------------\n")
+            
+            # 配合之前的建议，这里可以直接跳过这个坏数据，去拿下一个
+            # RISK: recursive retry can loop forever (and eventually hit recursion depth)
+            # if many consecutive tokens have missing camera files.
+            next_idx = (idx + 1) % len(self)
+            return self.__getitem__(next_idx)
         target_builder = self._agent.get_target_builders()[0]
         target_trajectory = target_builder.compute_targets(scene)
 
