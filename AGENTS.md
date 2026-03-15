@@ -73,32 +73,37 @@ Document custom paths inside configs before committing.
 
 ## Long Job Policy / 长任务运行规范
 - 除非是快速测试、语法检查或用户明确要求前台运行，所有长任务默认后台执行。
+- 后台启动建议优先使用 `tmux` 会话；`nohup`、裸 `&` 等方式在当前环境更容易被拦截或失效，除非用户明确要求，否则不要作为默认建议。
 - 后台任务必须写入独立日志文件，禁止只依赖终端滚动输出。
 - 日志必须按任务类型放入分类子目录：`logs/preprocess/`、`logs/sft/`、`logs/grpo/`、`logs/eval/`、`logs/debug/`（至少使用一级任务分类，禁止所有日志平铺在 `logs/` 根目录）。
 - 空日志（0 bytes）和失败日志必须及时清理，避免日志目录堆积无效文件。
 - 启动后台任务后，必须立即输出：
   - 进程 PID
+  - `tmux` session 名称
   - 日志绝对路径（便于 `tail -f` 查看）
 - 推荐启动模板：
   ```bash
   mkdir -p logs/{preprocess,sft,grpo,eval,debug}
   TASK_TYPE="preprocess"  # preprocess|sft|grpo|eval|debug
   RUN_TAG="nuplan_preprocess_$(date +%F_%H-%M-%S)"
+  SESSION_NAME="$RUN_TAG"
   LOG_DIR="/data/liushiqi/AutoVLA/logs/${TASK_TYPE}"
   LOG_PATH="${LOG_DIR}/${RUN_TAG}.log"
   mkdir -p "$LOG_DIR"
-  nohup bash scripts/run_nuplan_preprocessing.sh >"$LOG_PATH" 2>&1 &
-  PID=$!
+  tmux new-session -d -s "$SESSION_NAME" "bash scripts/run_nuplan_preprocessing.sh >'$LOG_PATH' 2>&1"
   sleep 2
-  if ! kill -0 "$PID" 2>/dev/null; then
+  PID="$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_pid}' | head -n 1)"
+  if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+    tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
     rm -f "$LOG_PATH"   # 启动失败，立即删除失败/空日志
-    echo "FAILED_TO_START PID=$PID"
+    echo "FAILED_TO_START SESSION=$SESSION_NAME"
   else
-    echo "PID=$PID LOG=$LOG_PATH"
+    echo "PID=$PID SESSION=$SESSION_NAME LOG=$LOG_PATH"
   fi
   ```
 - 结果检查示例：
   ```bash
+  tmux attach -t <run_tag>
   tail -f /data/liushiqi/AutoVLA/logs/<task_type>/<run_tag>.log
   ```
 - 日志清理示例（每次任务结束后执行）：
