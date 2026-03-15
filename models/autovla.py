@@ -83,9 +83,55 @@ class GRPOAutoVLA(pl.LightningModule):
             reward = reward * reward_scale
             
             # Normalize the rewards to compute the advantage.
-            groupped_rewards = self.all_gather(reward)
-            print(groupped_rewards)
-            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std() + 1e-4)
+            grouped_rewards = self.all_gather(reward)
+            grouped_rewards_flat = grouped_rewards.detach().float().reshape(-1)
+            grouped_reward_mean = grouped_rewards_flat.mean()
+            grouped_reward_min = grouped_rewards_flat.min()
+            grouped_reward_max = grouped_rewards_flat.max()
+            grouped_reward_range = grouped_reward_max - grouped_reward_min
+            self.log("group_reward_range", grouped_reward_range, sync_dist=False, prog_bar=True, on_step=True, on_epoch=False)
+
+            action_token_count = torch.tensor(
+                float(sample['action_token_count']),
+                device=reward.device,
+                dtype=reward.dtype
+            )
+            completion_token_count = torch.tensor(
+                float(sample['completion_token_count']),
+                device=reward.device,
+                dtype=reward.dtype
+            )
+            prompt_token_count = torch.tensor(
+                float(sample['prompt_length']),
+                device=reward.device,
+                dtype=reward.dtype
+            )
+            total_token_count = prompt_token_count + completion_token_count
+            text_token_count = torch.clamp(completion_token_count - action_token_count, min=0.0)
+            action_token_ratio = action_token_count / torch.clamp(completion_token_count, min=1.0)
+
+            grouped_action_token_count = self.all_gather(action_token_count).detach().float().reshape(-1)
+            grouped_completion_token_count = self.all_gather(completion_token_count).detach().float().reshape(-1)
+            grouped_prompt_token_count = self.all_gather(prompt_token_count).detach().float().reshape(-1)
+            grouped_total_token_count = self.all_gather(total_token_count).detach().float().reshape(-1)
+            grouped_text_token_count = self.all_gather(text_token_count).detach().float().reshape(-1)
+            grouped_action_token_ratio = self.all_gather(action_token_ratio).detach().float().reshape(-1)
+            self.log("action_token_count_mean", grouped_action_token_count.mean(), sync_dist=False, prog_bar=False, on_step=True, on_epoch=False)
+            self.log("completion_token_count_mean", grouped_completion_token_count.mean(), sync_dist=False, prog_bar=True, on_step=True, on_epoch=False)
+            self.log("prompt_token_count_mean", grouped_prompt_token_count.mean(), sync_dist=False, prog_bar=False, on_step=True, on_epoch=False)
+            self.log("total_token_count_mean", grouped_total_token_count.mean(), sync_dist=False, prog_bar=False, on_step=True, on_epoch=False)
+            self.log("text_token_count_mean", grouped_text_token_count.mean(), sync_dist=False, prog_bar=False, on_step=True, on_epoch=False)
+            self.log("action_token_ratio_mean", grouped_action_token_ratio.mean(), sync_dist=False, prog_bar=True, on_step=True, on_epoch=False)
+            if self.global_rank == 0 and (self.global_step % 100 == 0):
+                print(
+                    f"[GRPO_DIAG] step={self.global_step} "
+                    f"reward_mean={grouped_reward_mean.item():.6f} "
+                    f"reward_min={grouped_reward_min.item():.6f} "
+                    f"reward_max={grouped_reward_max.item():.6f} "
+                    f"reward_range={grouped_reward_range.item():.6f}"
+                )
+
+            advantage = (reward - grouped_rewards.mean()) / (grouped_rewards.std() + 1e-4)
 
         # Compute the per-token log probabilities.
         per_token_logps = self.get_per_token_logps(
@@ -233,6 +279,7 @@ class GRPOAutoVLA(pl.LightningModule):
 
             # Extract action tokens and trajectory (! batch size = 1)
             actions_tokens = completion_ids[0][completion_ids[0] >= self.action_start_id]
+            action_token_count = int(actions_tokens.numel())
 
             # Force a fixed-length rollout so PDMS expects the same horizon when scoring.
             if len(actions_tokens) > self.trajectory_sampling.num_poses:
@@ -252,6 +299,7 @@ class GRPOAutoVLA(pl.LightningModule):
             eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
             sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
             completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+            completion_token_count = int(completion_mask[0].sum().item())
 
             # Concatenate prompt_mask with completion_mask for logit computation
             attention_mask = torch.cat([prompt_mask, completion_mask], dim=1) 
@@ -262,6 +310,8 @@ class GRPOAutoVLA(pl.LightningModule):
             outputs = {'trajectory': trajectory, 
                        'token': data['token'], 
                        'completion_texts': completion_texts,
+                       'action_token_count': action_token_count,
+                       'completion_token_count': completion_token_count,
                        'prompt_length': prompt_length,
                        'input_ids': prompt_completion_ids, 
                        'completion_ids': completion_ids,
@@ -309,11 +359,17 @@ class GRPOAutoVLA(pl.LightningModule):
             torch.nn.utils.clip_grad_value_(params_with_grad, clip_value=gradient_clip_val)
 
     def on_save_checkpoint(self, checkpoint: dict):
-        # only save main model
+        # Keep full model state by default so Lightning ckpt_path resume can restore training strictly.
+        return
+
+    def on_load_checkpoint(self, checkpoint: dict):
+        # Backward compatibility: older checkpoints may not contain reference_model.* keys.
         sd = checkpoint.get("state_dict", {})
-        for k in list(sd):
-            if k.startswith("reference_model."):
-                sd.pop(k)
+        has_reference = any(k.startswith("reference_model.") for k in sd.keys())
+        if (not has_reference) and hasattr(self, "reference_model"):
+            ref_sd = self.reference_model.state_dict()
+            for k, v in ref_sd.items():
+                sd[f"reference_model.{k}"] = v
 
 class SFTAutoVLA(pl.LightningModule):
     def __init__(self, config: dict):
