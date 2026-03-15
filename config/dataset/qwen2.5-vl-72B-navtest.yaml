@@ -1,0 +1,14 @@
+name: qwen2.5-vl-72B-navtest
+description: Preprocessing dataset for AutoVLA on Navsim navtest split (No-CoT)
+
+# model
+pretrained_model_path: /data/ckpt/Qwen/Qwen2___5-VL-72B-Instruct
+
+# training
+batch_size: 1
+num_workers: 32
+
+# dataset settings
+dataset_name: nuplan
+dataset_path: /data/dataset/navsim/placeholder/test
+scene_filter: /data/liushiqi/AutoVLA_main_rl_v1/navsim/navsim/planning/script/config/common/train_test_split/scene_filter/navtest.yaml
