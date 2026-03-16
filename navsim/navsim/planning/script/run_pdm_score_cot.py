@@ -28,6 +28,8 @@ from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator imp
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.metric_caching.metric_cache import MetricCache
 from navsim.visualization.plots import plot_cameras_frame_with_bev_agent_cot
+from tools.eval.navsim_eval_audit import load_csv_rows, summarize_csv_rows
+from tools.eval.navsim_eval_runtime import intersect_tokens_preserve_order, seed_everything, token_seed
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[D
     ), "Simulator and scorer proposal sampling has to be identical"
     agent: AbstractAgent = instantiate(cfg.agent)
     agent.initialize()
+    base_seed = cfg.get("seed")
 
     metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
     scene_filter: SceneFilter = instantiate(cfg.train_test_split.scene_filter)
@@ -67,7 +70,7 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[D
         sensor_config=agent.get_sensor_config(),
     )
 
-    tokens_to_evaluate = list(set(scene_loader.tokens) & set(metric_cache_loader.tokens))
+    tokens_to_evaluate = intersect_tokens_preserve_order(scene_loader.tokens, metric_cache_loader.tokens)
     pdm_results: List[Dict[str, Any]] = []
     for idx, (token) in enumerate(tokens_to_evaluate):
         logger.info(
@@ -75,6 +78,8 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[D
         )
         score_row: Dict[str, Any] = {"token": token, "valid": True}
         try:
+            if base_seed is not None:
+                seed_everything(token_seed(int(base_seed), token))
             metric_cache_path = metric_cache_loader.metric_cache_paths[token]
             with lzma.open(metric_cache_path, "rb") as f:
                 metric_cache: MetricCache = pickle.load(f)
@@ -127,6 +132,7 @@ def main(cfg: DictConfig) -> None:
     """
 
     build_logger(cfg)
+    seed_everything(cfg.get("seed"))
     worker = build_worker(cfg)
 
     # Extract scenes based on scene-loader to know which tokens to distribute across workers
@@ -139,7 +145,7 @@ def main(cfg: DictConfig) -> None:
     )
     metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
 
-    tokens_to_evaluate = list(set(scene_loader.tokens) & set(metric_cache_loader.tokens))
+    tokens_to_evaluate = intersect_tokens_preserve_order(scene_loader.tokens, metric_cache_loader.tokens)
     num_missing_metric_cache_tokens = len(set(scene_loader.tokens) - set(metric_cache_loader.tokens))
     num_unused_metric_cache_tokens = len(set(metric_cache_loader.tokens) - set(scene_loader.tokens))
     if num_missing_metric_cache_tokens > 0:
@@ -147,13 +153,14 @@ def main(cfg: DictConfig) -> None:
     if num_unused_metric_cache_tokens > 0:
         logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
     logger.info("Starting pdm scoring of %s scenarios...", str(len(tokens_to_evaluate)))
+    tokens_per_log = scene_loader.get_tokens_list_per_log()
     data_points = [
         {
             "cfg": cfg,
             "log_file": log_file,
-            "tokens": tokens_list,
+            "tokens": intersect_tokens_preserve_order(tokens_list, metric_cache_loader.tokens),
         }
-        for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
+        for log_file, tokens_list in sorted(tokens_per_log.items())
     ]
     score_rows: List[Tuple[Dict[str, Any], int, int]] = worker_map(worker, run_pdm_score, data_points)
 
@@ -167,15 +174,23 @@ def main(cfg: DictConfig) -> None:
 
     save_path = Path(cfg.output_dir)
     timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-    pdm_score_df.to_csv(save_path / f"{timestamp}.csv")
+    csv_path = save_path / f"{timestamp}.csv"
+    pdm_score_df.to_csv(csv_path)
+    summary = summarize_csv_rows(load_csv_rows(csv_path))
+    summary["successful_scenarios"] = int(num_sucessful_scenarios)
+    summary["failed_scenarios"] = int(num_failed_scenarios)
+    summary["csv_path"] = str(csv_path)
+    with open(save_path / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    average_score = summary["score_mean_valid"]
 
     logger.info(
         f"""
         Finished running evaluation.
             Number of successful scenarios: {num_sucessful_scenarios}.
             Number of failed scenarios: {num_failed_scenarios}.
-            Final average score of valid results: {pdm_score_df['score'].mean()}.
-            Results are stored in: {save_path / f"{timestamp}.csv"}.
+            Final average score of valid results: {average_score}.
+            Results are stored in: {csv_path}.
         """
     )
 

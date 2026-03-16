@@ -13,6 +13,7 @@ from qwen_vl_utils import process_vision_info
 from models.action_tokenizer import ActionTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from models.utils.score import PDM_Reward, TrajectorySampling, Trajectory
+from tools.eval.navsim_eval_runtime import build_generation_kwargs
 
 
 class GRPOAutoVLA(pl.LightningModule):
@@ -220,11 +221,7 @@ class GRPOAutoVLA(pl.LightningModule):
         with torch.no_grad():
             prompt_completion_ids = model.vlm.generate(
                 **model_inputs,
-                do_sample=True,
-                max_length=self._sample_generation_temperature['max_length'],
-                temperature=self._sample_generation_temperature['temperature'],
-                top_k=self._sample_generation_temperature['top_k'],
-                top_p=self._sample_generation_temperature['top_p'],
+                **build_generation_kwargs(self._sample_generation_temperature),
             )
 
             prompt_length = inputs.input_ids.size(1)
@@ -500,11 +497,7 @@ class AutoVLA(torch.nn.Module):
 
         outputs = self.vlm.generate(
             **model_inputs,
-            max_length=self.gen_conf['max_length'],
-            do_sample=True,
-            temperature=self.gen_conf['temperature'],
-            top_k=self.gen_conf['top_k'],
-            top_p=self.gen_conf['top_p'],
+            **build_generation_kwargs(self.gen_conf),
         )
 
         outputs_trimmed = [
