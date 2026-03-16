@@ -41,6 +41,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 
 from models.autovla import GRPOAutoVLA
+from models.utils.trainer_progress import build_tqdm_progress_bar
 from dataset_utils.rft_dataset import RFTDataset
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
 import datetime
@@ -299,6 +300,24 @@ if __name__ == "__main__":
             f"Expected one of ['ddp', 'fsdp']."
         )
     
+    callbacks = [
+        ModelCheckpoint(
+            monitor="avg_train_reward",
+            mode="max",
+            save_top_k=-1,
+            dirpath=str(ckpt_dir),
+            filename="rft-step{step}-reward{avg_train_reward:.4f}",
+            auto_insert_metric_name=False,
+            save_weights_only=True,
+            every_n_train_steps=500,
+            save_on_train_epoch_end=False
+        ),
+        LearningRateMonitor(logging_interval="step")
+    ]
+    progress_bar_callback = build_tqdm_progress_bar(config.get("training", {}))
+    if progress_bar_callback is not None:
+        callbacks.append(progress_bar_callback)
+
     trainer = Trainer(
         num_nodes=1,
         max_epochs=config['training']['epochs'],
@@ -307,23 +326,11 @@ if __name__ == "__main__":
         devices=config['training']['devices'], 
         num_sanity_val_steps=0,
         strategy=trainer_strategy,
-        callbacks=[
-            ModelCheckpoint(
-                monitor="avg_train_reward",
-                mode="max",
-                save_top_k=-1,
-                dirpath=str(ckpt_dir),
-                filename="rft-step{step}-reward{avg_train_reward:.4f}",
-                auto_insert_metric_name=False,
-                save_weights_only=True,
-                every_n_train_steps=500,
-                save_on_train_epoch_end=False
-            ),
-            LearningRateMonitor(logging_interval="step")
-        ],
+        callbacks=callbacks,
         logger=[csv_logger, tb_logger],
         enable_model_summary=True,
         log_every_n_steps=int(config['training'].get('log_every_n_steps', 1)),
+        enable_progress_bar=bool(config['training'].get('enable_progress_bar', True)),
         gradient_clip_algorithm="value",
         gradient_clip_val=1.0,
         limit_val_batches=0

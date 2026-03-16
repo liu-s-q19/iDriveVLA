@@ -33,7 +33,6 @@ from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.callbacks import LearningRateMonitor
-from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning import seed_everything
 from pytorch_lightning.strategies import FSDPStrategy, DDPStrategy
 
@@ -44,6 +43,7 @@ from torch.utils.data import DataLoader
 
 from dataset_utils.sft_dataset import SFTDataset, DataCollator
 from models.autovla import SFTAutoVLA
+from models.utils.trainer_progress import build_tqdm_progress_bar
 from transformers import AutoProcessor
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
 import datetime
@@ -253,12 +253,9 @@ if __name__ == "__main__":
         EarlyStopping(monitor="val_loss", patience=10, mode="min"),
         LearningRateMonitor(logging_interval="step"),
     ]
-    if bool(training_cfg.get("enable_progress_bar", True)):
-        callbacks.append(
-            TQDMProgressBar(
-                refresh_rate=max(1, int(training_cfg.get("progress_bar_refresh_rate", 1)))
-            )
-        )
+    progress_bar_callback = build_tqdm_progress_bar(training_cfg)
+    if progress_bar_callback is not None:
+        callbacks.append(progress_bar_callback)
 
     trainer = pl.Trainer(
         num_nodes=trainer_num_nodes,
