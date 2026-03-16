@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import torch
 from torch.utils.data import Dataset
-from navsim.agents.autovla_agent import AutoVLAAgent
+from dataset_utils.autovla_agent_compat import AutoVLAAgent
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from typing import Dict
 
@@ -10,6 +10,7 @@ class RFTDataset(Dataset):
     def __init__(self, data_config, model_config):
         data_paths = data_config['json_dataset_path']
         self.sensor_data_path = data_config['sensor_data_path']
+        self.max_samples = int(data_config.get('max_samples', 0) or 0)
 
         if isinstance(data_paths, (str, Path)):
             self.data_paths = [Path(data_paths)]
@@ -34,6 +35,9 @@ class RFTDataset(Dataset):
         for data_path in self.data_paths:
             path_scenes = sorted(list(data_path.glob('*.json')))
             self.scenes.extend(path_scenes)
+
+        if self.max_samples > 0:
+            self.scenes = self.scenes[: self.max_samples]
             
         if not self.scenes:
             raise ValueError(f"No JSON files found in any of the provided data paths: {self.data_paths}")

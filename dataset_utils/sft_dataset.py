@@ -9,7 +9,7 @@ from qwen_vl_utils import process_vision_info
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from models.action_tokenizer import ActionTokenizer
-from navsim.agents.autovla_agent import AutoVLAAgent
+from dataset_utils.autovla_agent_compat import AutoVLAAgent
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
 IGNORE_INDEX = -100

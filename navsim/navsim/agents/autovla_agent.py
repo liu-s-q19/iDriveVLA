@@ -27,6 +27,7 @@ from navsim.agents.utils import (
     transform_to_local,
     wrap_angle,
 )
+from navsim_ext.agent_ctor_compat import init_abstract_agent_compat
 
 
 
@@ -254,11 +255,12 @@ class AutoVLAAgentFeatureBuilder(AbstractFeatureBuilder):
         # Normalize camera names across datasets
         # NuPlan uses left/right_camera, others use front_left/right_camera
         if dataset_name == 'nuplan':
-            front_left_cam = scene_data.get('left_camera_paths')
-            front_right_cam = scene_data.get('right_camera_paths')
+            # Keep nuplan legacy mapping first; fallback supports newer key names.
+            front_left_cam = scene_data.get('left_camera_paths') or scene_data.get('front_left_camera_paths')
+            front_right_cam = scene_data.get('right_camera_paths') or scene_data.get('front_right_camera_paths')
         else:
-            front_left_cam = scene_data.get('front_left_camera_paths')
-            front_right_cam = scene_data.get('front_right_camera_paths')
+            front_left_cam = scene_data.get('front_left_camera_paths') or scene_data.get('left_camera_paths')
+            front_right_cam = scene_data.get('front_right_camera_paths') or scene_data.get('right_camera_paths')
 
         images = {
             "front_camera": front_cam,
@@ -347,7 +349,12 @@ class AutoVLAAgent(AbstractAgent):
         :param device: device to use, defaults to 'cuda'
         :param skip_model_load: whether to skip model loading, defaults to False
         """
-        super().__init__()
+        init_abstract_agent_compat(
+            self,
+            AbstractAgent.__init__,
+            trajectory_sampling=trajectory_sampling,
+            requires_scene=False,
+        )
         self._trajectory_sampling = trajectory_sampling
         
         config = None

@@ -1,5 +1,8 @@
 import torch
 import os
+import torch.distributed as dist
+import hashlib
+import re
 from tqdm import tqdm
 from typing import Dict, Any
 import pytorch_lightning as pl
@@ -11,16 +14,36 @@ from torch.distributed.fsdp import StateDictType
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 from models.action_tokenizer import ActionTokenizer
+from models.utils.grpo_metrics import masked_token_mean
+from models.utils.grpo_log_keys import progress_bar_metric_names
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from models.utils.score import PDM_Reward, TrajectorySampling, Trajectory
+from navsim.common.dataclasses import Trajectory
+from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
+
+try:
+    from models.utils.score import PDM_Reward
+    _PDM_REWARD_IMPORT_ERROR = None
+except Exception as exc:
+    # SFT inference/evaluation should not hard-fail on GRPO-only reward dependencies.
+    PDM_Reward = None
+    _PDM_REWARD_IMPORT_ERROR = exc
 
 
 class GRPOAutoVLA(pl.LightningModule):
+    @staticmethod
+    def _progress_bar_metric_names():
+        return progress_bar_metric_names()
+
     def __init__(self, config: dict, inference=False):
         super().__init__()
         self.cfg = config
         self.use_cot = config['model']['use_cot']
         self.save_hyperparameters()
+        if PDM_Reward is None:
+            raise ImportError(
+                "Failed to import GRPO reward dependencies from models.utils.score. "
+                f"Original error: {_PDM_REWARD_IMPORT_ERROR}"
+            )
 
         # Load trajectory sampling from config or use default
         traj_conf = config['model']['trajectory']
@@ -40,6 +63,17 @@ class GRPOAutoVLA(pl.LightningModule):
         self.autovla.train()
         self._train_vision_backbone = config['model']['train_vision_backbone']
         self._train_llm_backbone = config['model']['train_lm_backbone']
+        self._log_grouped_rewards = bool(config.get('training', {}).get('log_grouped_rewards', False))
+        self._empty_cache_each_step = bool(config.get('training', {}).get('empty_cache_each_step', False))
+        self._sampling_seed_mode = str(config.get('training', {}).get('sampling_seed_mode', 'step_rank')).lower()
+        self._sampling_seed_base = int(config.get('training', {}).get('sampling_seed_base', 1234))
+        self._last_sampling_seed = None
+        self._debug_compare_outputs = bool(config.get('training', {}).get('debug_compare_outputs', False))
+        self._debug_compare_steps = int(config.get('training', {}).get('debug_compare_steps', 3))
+        self._debug_text_preview_chars = int(config.get('training', {}).get('debug_text_preview_chars', 120))
+        advantage_cfg = config.get('rl', {}).get('advantage', {})
+        self._adv_group_std_eps = float(advantage_cfg.get('group_std_eps', 1e-6))
+        self._adv_fallback_mode = str(advantage_cfg.get('fallback_mode', 'reward')).lower()
 
         # online reference model.
         if not inference:
@@ -47,21 +81,27 @@ class GRPOAutoVLA(pl.LightningModule):
             state_dict = torch.load(config['model']['sft_model_path'])["state_dict"]
             state_dict = {k.replace("autovla.", "").replace("drivevla.", ""): v for k, v in state_dict.items()}
             self.reference_model.load_state_dict(state_dict, strict=False)
+            for param in self.reference_model.parameters():
+                param.requires_grad = False
             self.reference_model.eval()  
             print(f"Using online reference model from {config['model']['sft_model_path']}")
 
         # sample generation config
         sample_conf = config['training']['sample']
         self._sample_generation_temperature = {
-            "max_length": sample_conf['max_length'],
             "temperature": sample_conf['temperature'],
             "top_k": sample_conf['top_k'],
             "top_p": sample_conf['top_p'],
         }
+        if sample_conf.get('max_new_tokens') is not None:
+            self._sample_generation_temperature["max_new_tokens"] = int(sample_conf['max_new_tokens'])
+        else:
+            self._sample_generation_temperature["max_length"] = sample_conf['max_length']
 
         # reward function
-        self.train_critic = PDM_Reward(Path(config['data']['train']['metric_cache_path']))
-        self.val_critic = PDM_Reward(Path(config['data']['val']['metric_cache_path']))
+        reward_cfg = config.get('rl', {}).get('reward', {})
+        self.train_critic = PDM_Reward(Path(config['data']['train']['metric_cache_path']), reward_cfg=reward_cfg)
+        self.val_critic = PDM_Reward(Path(config['data']['val']['metric_cache_path']), reward_cfg=reward_cfg)
 
         # sliding window for training reward
         if not inference:
@@ -81,11 +121,34 @@ class GRPOAutoVLA(pl.LightningModule):
             reward = self.reward_function(sample)
             reward_scale = self.cfg['rl']['reward'].get("scale", 1.0)
             reward = reward * reward_scale
+            self.log("scaled_train_reward", reward.mean(), sync_dist=True, prog_bar=("scaled_train_reward" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            self._log_sample_health(sample, device=reward.device)
             
             # Normalize the rewards to compute the advantage.
             groupped_rewards = self.all_gather(reward)
-            print(groupped_rewards)
-            advantage = (reward - groupped_rewards.mean()) / (groupped_rewards.std() + 1e-4)
+            group_mean = groupped_rewards.mean()
+            group_std = groupped_rewards.std(unbiased=False)
+            grouped_seeds = None
+            if self._log_grouped_rewards and self._last_sampling_seed is not None:
+                local_seed = torch.tensor(float(self._last_sampling_seed), device=reward.device)
+                grouped_seeds = self.all_gather(local_seed).flatten()
+            if self._log_grouped_rewards and self.global_rank == 0:
+                print(groupped_rewards)
+                if grouped_seeds is not None:
+                    print(f"group_sampling_seeds={grouped_seeds.tolist()}")
+                print(f"group_reward_std={group_std.item():.6f}")
+            self._debug_compare_group_outputs(sample, groupped_rewards, group_std)
+            self.log("group_reward_std", group_std, sync_dist=False, prog_bar=("group_reward_std" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            fallback_used = 0.0
+            if group_std.detach().item() < self._adv_group_std_eps:
+                advantage = self._fallback_advantage(reward)
+                fallback_used = 1.0
+                if self._log_grouped_rewards and self.global_rank == 0:
+                    print(f"group_advantage_fallback={self._adv_fallback_mode}")
+            else:
+                advantage = (reward - group_mean) / (group_std + 1e-4)
+            self.log("group_adv_fallback", fallback_used, sync_dist=False, prog_bar=("group_adv_fallback" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            self.log("train_advantage", advantage.mean(), sync_dist=True, on_step=True, on_epoch=False)
 
         # Compute the per-token log probabilities.
         per_token_logps = self.get_per_token_logps(
@@ -113,20 +176,24 @@ class GRPOAutoVLA(pl.LightningModule):
         # Compute the policy loss
         per_policy_loss = \
             torch.exp(per_token_logps - per_token_logps.detach()) * advantage.unsqueeze(-1)
+        policy_objective = masked_token_mean(per_policy_loss, completion_mask)
+        policy_loss = -policy_objective
 
         # Compute the kl loss
         kl_beta = self.cfg['rl'].get("kl_beta", 0.0)
         per_token_kl = \
             torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
         per_kl_loss = kl_beta * per_token_kl
+        kl_loss = masked_token_mean(per_kl_loss, completion_mask)
 
         per_token_loss = -(per_policy_loss - per_kl_loss)
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        loss = masked_token_mean(per_token_loss, completion_mask)
 
         # Log metrics
-        self.log("loss", loss, sync_dist=True, prog_bar=True)
-        per_kl_loss = ((per_kl_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-        self.log("kl_divergence", per_kl_loss, sync_dist=True)
+        self.log("loss", loss, sync_dist=True, prog_bar=("loss" in self._progress_bar_metric_names()))
+        self.log("policy_objective", policy_objective, sync_dist=True, prog_bar=False, on_step=True, on_epoch=False)
+        self.log("policy_loss", policy_loss, sync_dist=True, prog_bar=("policy_loss" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+        self.log("kl_divergence", kl_loss, sync_dist=True, on_step=True, on_epoch=False)
 
         # record training reward
         self.training_buffer_record(reward.mean())
@@ -150,6 +217,21 @@ class GRPOAutoVLA(pl.LightningModule):
                 prog_bar=True
             )
 
+    def _fallback_advantage(self, reward: torch.Tensor) -> torch.Tensor:
+        if self._adv_fallback_mode == "zero":
+            return torch.zeros_like(reward)
+        if self._adv_fallback_mode == "running_baseline":
+            baseline = self._running_reward_baseline(reward.device, reward.dtype)
+            return reward - baseline
+        # Default fallback: keep a non-zero learning signal when group std collapses.
+        return reward
+
+    def _running_reward_baseline(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        count = int(self.window_count.item())
+        if count <= 0:
+            return torch.tensor(0.0, device=device, dtype=dtype)
+        return self.training_reward_buffer[:count].to(device=device, dtype=dtype).mean()
+
     def on_after_backward(self):
         total_norm = 0.0
         for p in self.parameters():
@@ -158,6 +240,103 @@ class GRPOAutoVLA(pl.LightningModule):
                 total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
         self.log("grad_norm", total_norm, sync_dist=True)
+
+    @staticmethod
+    def _hash_bytes(raw: bytes) -> str:
+        return hashlib.sha1(raw).hexdigest()[:16]
+
+    def _hash_text(self, text: str) -> str:
+        return self._hash_bytes(text.encode("utf-8", errors="ignore"))
+
+    def _hash_tensor(self, tensor: torch.Tensor) -> str:
+        arr = tensor.detach().cpu().contiguous().numpy()
+        return self._hash_bytes(arr.tobytes())
+
+    def _extract_action_tokens_from_completion(self, completion_ids: torch.Tensor, tokenizer) -> torch.Tensor:
+        valid_action_ids = []
+        for tok in completion_ids.tolist():
+            if tok < self.action_start_id:
+                continue
+            decoded = tokenizer.decode([int(tok)])
+            m = re.fullmatch(r"<action_(\d+)>", decoded.strip())
+            if m is not None:
+                valid_action_ids.append(int(tok))
+        if not valid_action_ids:
+            return torch.empty((0,), dtype=torch.long, device=completion_ids.device)
+        return torch.tensor(valid_action_ids, dtype=torch.long, device=completion_ids.device)
+
+    def _should_debug_compare(self) -> bool:
+        if not self._debug_compare_outputs:
+            return False
+        step = int(getattr(self, "global_step", 0))
+        return step < self._debug_compare_steps
+
+    def _debug_compare_group_outputs(self, sample: Dict[str, Any], grouped_rewards: torch.Tensor, group_std: torch.Tensor) -> None:
+        if not self._should_debug_compare():
+            return
+
+        step = int(getattr(self, "global_step", 0))
+        rank = int(getattr(self, "global_rank", 0))
+        if dist.is_available() and dist.is_initialized():
+            world_size = int(dist.get_world_size())
+        else:
+            world_size = int(getattr(self, "world_size", 1))
+
+        local_summary = {
+            "rank": rank,
+            "step": step,
+            "token": str(sample["token"][0]) if isinstance(sample.get("token"), list) and sample["token"] else str(sample.get("token")),
+            "completion_text_hash": sample.get("completion_text_hash"),
+            "completion_ids_hash": sample.get("completion_ids_hash"),
+            "action_tokens_hash": sample.get("action_tokens_hash"),
+            "trajectory_hash": sample.get("trajectory_hash"),
+            "action_candidate_count": sample.get("action_candidate_count"),
+            "action_tokens_len": sample.get("action_tokens_len"),
+            "action_nonzero_count": sample.get("action_nonzero_count"),
+            "completion_preview": sample.get("completion_preview"),
+            "sampling_seed": sample.get("sampling_seed"),
+        }
+
+        if dist.is_available() and dist.is_initialized():
+            gathered = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered, local_summary)
+        else:
+            gathered = [local_summary]
+
+        if rank != 0:
+            return
+
+        print(f"[debug_compare] step={step} world_size={world_size}")
+        print(f"[debug_compare] grouped_rewards={grouped_rewards.flatten().tolist()} group_std={float(group_std.item()):.6f}")
+        for item in sorted(gathered, key=lambda x: x["rank"]):
+            preview = item["completion_preview"] if item["completion_preview"] is not None else ""
+            print(
+                f"[debug_compare][rank={item['rank']}] seed={item['sampling_seed']} token={item['token']} "
+                f"text_hash={item['completion_text_hash']} ids_hash={item['completion_ids_hash']} "
+                f"action_hash={item['action_tokens_hash']} traj_hash={item['trajectory_hash']} "
+                f"action_candidates={item['action_candidate_count']} action_len={item['action_tokens_len']} "
+                f"action_nonzero={item['action_nonzero_count']} "
+                f"preview={preview!r}"
+            )
+
+    def _log_sample_health(self, sample: Dict[str, Any], device: torch.device) -> None:
+        action_candidates = float(sample.get("action_candidate_count", 0))
+        action_len = float(sample.get("action_tokens_len", 0))
+        action_nonzero = float(sample.get("action_nonzero_count", 0))
+        has_action = 1.0 if action_len > 0 else 0.0
+        completion_ids = sample.get("completion_ids")
+        if isinstance(completion_ids, torch.Tensor) and completion_ids.ndim >= 2:
+            completion_len = float(completion_ids.shape[1])
+        else:
+            completion_len = 0.0
+        prompt_len = float(sample.get("prompt_length", 0))
+
+        self.log("sample_action_candidate_count", torch.tensor(action_candidates, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_action_tokens_len", torch.tensor(action_len, device=device), sync_dist=True, prog_bar=("sample_action_tokens_len" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+        self.log("sample_action_nonzero_count", torch.tensor(action_nonzero, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_has_action", torch.tensor(has_action, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_completion_len", torch.tensor(completion_len, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_prompt_len", torch.tensor(prompt_len, device=device), sync_dist=True, on_step=True, on_epoch=False)
     
     def reward_function(self, sample):
         device = next(self.parameters()).device
@@ -188,8 +367,8 @@ class GRPOAutoVLA(pl.LightningModule):
         else:
             cot_penalties = torch.tensor(0.0, device=device, dtype=reward.dtype)
 
-        self.log("train_reward", reward, sync_dist=True, prog_bar=True, on_step=True, on_epoch=False)
-        self.log("cot_penalty", cot_penalties.mean(), sync_dist=True, prog_bar=True, on_step=True, on_epoch=False)
+        self.log("train_reward", reward, sync_dist=True, prog_bar=("train_reward" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+        self.log("cot_penalty", cot_penalties.mean(), sync_dist=True, prog_bar=("cot_penalty" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
 
         return reward
     
@@ -207,24 +386,56 @@ class GRPOAutoVLA(pl.LightningModule):
         per_token_logps = log_probs.gather(2, input_ids.unsqueeze(-1)).squeeze(-1)  # (B, L-1)
         return per_token_logps
 
+    def _seed_sampling_rng(self):
+        if self._sampling_seed_mode == "none":
+            self._last_sampling_seed = None
+            return None
+
+        trainer = getattr(self, "_trainer", None)
+        if dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            global_rank = dist.get_rank()
+        else:
+            world_size = max(int(getattr(trainer, "world_size", 1)), 1) if trainer is not None else 1
+            global_rank = int(getattr(trainer, "global_rank", 0)) if trainer is not None else 0
+        global_step = int(getattr(trainer, "global_step", 0)) if trainer is not None else 0
+
+        if self._sampling_seed_mode == "rank":
+            seed = self._sampling_seed_base + global_rank
+        else:
+            # Default: make sampling differ across both rank and step while staying reproducible.
+            seed = self._sampling_seed_base + global_step * world_size + global_rank
+
+        seed = int(seed % (2**31 - 1))
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        self._last_sampling_seed = seed
+        return seed
+
     def generate_sample(self, data, model, device):
 
         # Get the model inputs
         inputs = model.get_prompt(data['input_features'])
         model_inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
-        # set seed
-        torch.manual_seed(int(str(device).split(':')[-1]))
-
         # Generate completion
         with torch.no_grad():
+            gen_kwargs = {
+                "do_sample": True,
+                "temperature": self._sample_generation_temperature['temperature'],
+                "top_k": self._sample_generation_temperature['top_k'],
+                "top_p": self._sample_generation_temperature['top_p'],
+            }
+            self._seed_sampling_rng()
+            if 'max_new_tokens' in self._sample_generation_temperature:
+                gen_kwargs["max_new_tokens"] = self._sample_generation_temperature['max_new_tokens']
+            else:
+                gen_kwargs["max_length"] = self._sample_generation_temperature['max_length']
+
             prompt_completion_ids = model.vlm.generate(
                 **model_inputs,
-                do_sample=True,
-                max_length=self._sample_generation_temperature['max_length'],
-                temperature=self._sample_generation_temperature['temperature'],
-                top_k=self._sample_generation_temperature['top_k'],
-                top_p=self._sample_generation_temperature['top_p'],
+                **gen_kwargs,
             )
 
             prompt_length = inputs.input_ids.size(1)
@@ -232,7 +443,10 @@ class GRPOAutoVLA(pl.LightningModule):
             completion_ids = prompt_completion_ids[:, prompt_length:]
 
             # Extract action tokens and trajectory (! batch size = 1)
-            actions_tokens = completion_ids[0][completion_ids[0] >= self.action_start_id]
+            raw_action_candidates = completion_ids[0][completion_ids[0] >= self.action_start_id]
+            raw_action_candidate_count = int(raw_action_candidates.numel())
+            actions_tokens = self._extract_action_tokens_from_completion(completion_ids[0], model.processor.tokenizer)
+            raw_action_len = int(actions_tokens.numel())
 
             if len(actions_tokens) > self.trajectory_sampling.num_poses:
                 actions_tokens = actions_tokens[:self.trajectory_sampling.num_poses]
@@ -242,8 +456,9 @@ class GRPOAutoVLA(pl.LightningModule):
             else:
                 pass
 
-            trajectory = self.autovla.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens.cpu())[0, 1:]
-            trajectory = Trajectory(trajectory.cpu().numpy(), self.trajectory_sampling)
+            decoded_traj = self.autovla.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens.cpu())[0, 1:]
+            decoded_traj_np = decoded_traj.cpu().numpy()
+            trajectory = Trajectory(decoded_traj_np, self.trajectory_sampling)
 
             # Create completion mask
             is_eos = completion_ids == model.processor.tokenizer.eos_token_id
@@ -256,6 +471,13 @@ class GRPOAutoVLA(pl.LightningModule):
             attention_mask = torch.cat([prompt_mask, completion_mask], dim=1) 
 
             completion_texts = model.processor.batch_decode(completion_ids)
+            completion_text = completion_texts[0] if completion_texts else ""
+            action_nonzero_count = int((actions_tokens != 0).sum().item())
+            completion_preview = completion_text[:self._debug_text_preview_chars]
+            completion_text_hash = self._hash_text(completion_text)
+            completion_ids_hash = self._hash_tensor(completion_ids[0])
+            action_tokens_hash = self._hash_tensor(actions_tokens)
+            trajectory_hash = self._hash_bytes(decoded_traj_np.tobytes())
 
             # Create outputs
             outputs = {'trajectory': trajectory, 
@@ -268,10 +490,19 @@ class GRPOAutoVLA(pl.LightningModule):
                        'completion_mask': completion_mask,
                        'pixel_values_videos': model_inputs['pixel_values_videos'], 
                        'video_grid_thw': model_inputs['video_grid_thw'],
+                       'completion_preview': completion_preview,
+                       'completion_text_hash': completion_text_hash,
+                       'completion_ids_hash': completion_ids_hash,
+                       'action_tokens_hash': action_tokens_hash,
+                       'action_candidate_count': raw_action_candidate_count,
+                       'action_tokens_len': raw_action_len,
+                       'action_nonzero_count': action_nonzero_count,
+                       'trajectory_hash': trajectory_hash,
+                       'sampling_seed': self._last_sampling_seed,
                         }
         
-        # clean up
-        torch.cuda.empty_cache()
+        if self._empty_cache_each_step:
+            torch.cuda.empty_cache()
 
         return outputs
     
@@ -325,13 +556,129 @@ class SFTAutoVLA(pl.LightningModule):
 
         self._train_vision_backbone = config['model']['train_vision_backbone']
         self._train_llm_backbone = config['model']['train_lm_backbone']
+        probe_cfg = config.get('training', {}).get('generated_action_probe', {})
+        self._probe_generated_action_enabled = bool(probe_cfg.get('enabled', False))
+        self._probe_generated_action_every_n_steps = int(probe_cfg.get('every_n_steps', 0))
+        self._probe_generated_action_max_new_tokens = int(probe_cfg.get('max_new_tokens', 128))
+        self._probe_generated_action_do_sample = bool(probe_cfg.get('do_sample', False))
+        self._probe_generated_action_temperature = float(probe_cfg.get('temperature', 1.0))
+        self._probe_generated_action_top_k = int(probe_cfg.get('top_k', 0))
+        self._probe_generated_action_top_p = float(probe_cfg.get('top_p', 1.0))
+        self._probe_generated_action_last_step = -1
+        self._assistant_id = torch.tensor(config['model']['tokens']['assistant_id'], dtype=torch.long)
+
+    @staticmethod
+    def _find_subsequence_start(sequence: torch.Tensor, pattern: torch.Tensor):
+        if sequence.ndim != 1 or pattern.ndim != 1:
+            return None
+        if pattern.numel() == 0 or sequence.numel() < pattern.numel():
+            return None
+        for idx in range(sequence.numel() - pattern.numel() + 1):
+            if torch.equal(sequence[idx:idx + pattern.numel()], pattern):
+                return idx
+        return None
+
+    def _extract_action_tokens_from_completion(self, completion_ids: torch.Tensor, tokenizer) -> torch.Tensor:
+        valid_action_ids = []
+        for tok in completion_ids.tolist():
+            if tok < self.autovla.action_start_id:
+                continue
+            decoded = tokenizer.decode([int(tok)])
+            m = re.fullmatch(r"<action_(\d+)>", decoded.strip())
+            if m is not None:
+                valid_action_ids.append(int(tok))
+        if not valid_action_ids:
+            return torch.empty((0,), dtype=torch.long, device=completion_ids.device)
+        return torch.tensor(valid_action_ids, dtype=torch.long, device=completion_ids.device)
+
+    def _maybe_log_generated_action_probe(self, batch: Dict[str, torch.Tensor]) -> None:
+        if not self._probe_generated_action_enabled:
+            return
+        if self._probe_generated_action_every_n_steps <= 0:
+            return
+        if int(getattr(self, "global_rank", 0)) != 0:
+            return
+
+        step = int(getattr(self, "global_step", 0))
+        if step % self._probe_generated_action_every_n_steps != 0:
+            return
+        if step == self._probe_generated_action_last_step:
+            return
+
+        input_ids = batch.get("input_ids")
+        attention_mask = batch.get("attention_mask")
+        if not isinstance(input_ids, torch.Tensor) or not isinstance(attention_mask, torch.Tensor):
+            return
+
+        assistant_pattern = self._assistant_id.to(device=input_ids.device)
+        start_idx = self._find_subsequence_start(input_ids[0], assistant_pattern)
+        if start_idx is None:
+            return
+        prompt_len = int(start_idx + assistant_pattern.numel())
+
+        generate_inputs = {
+            "input_ids": input_ids[:1, :prompt_len],
+            "attention_mask": attention_mask[:1, :prompt_len],
+        }
+        batch_size = int(input_ids.shape[0])
+        for key in ("pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw"):
+            val = batch.get(key)
+            if isinstance(val, torch.Tensor):
+                # Qwen2.5-VL collator may flatten vision tensors without a leading batch dim.
+                # Slice only tensors whose leading dim is the actual batch size.
+                if val.ndim > 0 and int(val.shape[0]) == batch_size:
+                    generate_inputs[key] = val[:1]
+                else:
+                    generate_inputs[key] = val
+
+        gen_kwargs = {
+            "max_new_tokens": max(1, int(self._probe_generated_action_max_new_tokens)),
+            "do_sample": bool(self._probe_generated_action_do_sample),
+        }
+        if gen_kwargs["do_sample"]:
+            gen_kwargs.update(
+                {
+                    "temperature": float(self._probe_generated_action_temperature),
+                    "top_k": int(self._probe_generated_action_top_k),
+                    "top_p": float(self._probe_generated_action_top_p),
+                }
+            )
+
+        vlm = self.autovla.vlm
+        was_training = vlm.training
+        self._probe_generated_action_last_step = step
+        try:
+            vlm.eval()
+            with torch.no_grad():
+                prompt_completion_ids = vlm.generate(**generate_inputs, **gen_kwargs)
+            completion_ids = prompt_completion_ids[:, prompt_len:][0]
+            action_candidates = int((completion_ids >= self.autovla.action_start_id).sum().item())
+            action_tokens = self._extract_action_tokens_from_completion(
+                completion_ids, self.autovla.processor.tokenizer
+            )
+            action_len = int(action_tokens.numel())
+            completion_len = int(completion_ids.numel())
+            has_action = 1.0 if action_len > 0 else 0.0
+
+            self.log("probe_gen_action_candidate_count", float(action_candidates), sync_dist=False, on_step=True, on_epoch=False)
+            self.log("probe_gen_action_tokens_len", float(action_len), sync_dist=False, on_step=True, on_epoch=False)
+            self.log("probe_gen_has_action", float(has_action), sync_dist=False, on_step=True, on_epoch=False)
+            self.log("probe_gen_completion_len", float(completion_len), sync_dist=False, on_step=True, on_epoch=False)
+            self.log("probe_gen_prompt_len", float(prompt_len), sync_dist=False, on_step=True, on_epoch=False)
+        except Exception as exc:
+            print(f"[probe_gen] failed at step={step}: {type(exc).__name__}: {exc}")
+            self.log("probe_gen_error", 1.0, sync_dist=False, on_step=True, on_epoch=False)
+        finally:
+            if was_training:
+                vlm.train()
 
     def training_step(self, batch):
         hascot = batch['has_cot']
         gt_trajectory = batch["gt_trajectory"]
         gt_action = batch["gt_action"]
         output = self.autovla(batch)
-        loss = output.loss
+        base_loss = output.loss
+        loss = base_loss
 
         # === Add additional loss on action tokens ===
         # output.logits shape: (B, T, V), labels shape: (B, T)
@@ -345,27 +692,50 @@ class SFTAutoVLA(pl.LightningModule):
         logits_flat = shift_logits.view(-1, vocab_size)
         labels_flat = shift_labels.view(-1)
         # Identify action token positions
-        action_mask = (labels_flat >= self.autovla.action_start_id)  # shape: (B*T,)
+        ignore_index = int(self.cfg['model']['tokens']['ignore_index'])
+        valid_mask = (labels_flat != ignore_index)
+        action_mask = valid_mask & (labels_flat >= self.autovla.action_start_id)  # shape: (B*T,)
         # Compute token-wise cross-entropy loss
-        ce_loss_all = F.cross_entropy(logits_flat, labels_flat, reduction='none')  # shape: (B*T,)
+        ce_loss_all = F.cross_entropy(
+            logits_flat,
+            labels_flat,
+            reduction='none',
+            ignore_index=ignore_index,
+        )  # shape: (B*T,)
         # Extract loss for action tokens
         action_loss = ce_loss_all[action_mask]
-        # Add to total loss with optional weighting factor
+        action_token_count = action_mask.sum()
+        valid_token_count = valid_mask.sum()
+        action_ratio = action_token_count.float() / valid_token_count.clamp_min(1).float()
+
+        # Add action-focused loss for all samples (not only has_cot).
         if action_loss.numel() > 0:
             action_loss = action_loss.mean()
+        else:
+            action_loss = torch.zeros((), device=loss.device, dtype=loss.dtype)
+        action_loss_weight = float(self.cfg.get('training', {}).get('action_loss_weight', 1.0))
+        loss = loss + action_loss_weight * action_loss
 
-        # # add more penalty for CoT reasoning data
-        if hascot[0] == True:
-            # print("add more penalty for CoT reasoning data")
-            loss = loss * 40
-            loss = loss + action_loss
+        # Keep legacy CoT multiplier configurable but disabled by default.
+        cot_loss_multiplier = float(self.cfg.get('training', {}).get('cot_sample_loss_multiplier', 1.0))
+        hascot_ratio = hascot.float().mean().to(loss.device)
+        if cot_loss_multiplier != 1.0:
+            loss = loss * (1.0 + (cot_loss_multiplier - 1.0) * hascot_ratio)
 
         self.log("train_loss", loss.item(),
                  batch_size=gt_action.shape[0],
                  sync_dist=True,
                  prog_bar=True)
-        
-        
+        self.log("train_base_loss", base_loss.detach(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_action_loss", action_loss.detach(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_action_loss_weight", action_loss_weight, sync_dist=False, on_step=True, on_epoch=False)
+        self.log("train_action_token_count", action_token_count.float(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_valid_token_count", valid_token_count.float(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_action_token_ratio", action_ratio.detach(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_has_cot_ratio", hascot_ratio.detach(), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("train_cot_loss_multiplier", cot_loss_multiplier, sync_dist=False, on_step=True, on_epoch=False)
+        self._maybe_log_generated_action_probe(batch)
+
         return loss
     
     def validation_step(self, batch):
@@ -489,22 +859,28 @@ class AutoVLA(torch.nn.Module):
 
         self.video_conf = config['model']['video']
         self.action_start_id = config['model']['tokens']['action_start_id']
+        self._trajectory_num_poses = int(config['model']['trajectory']['num_poses'])
 
         self.use_cot = config['model']['use_cot']
         self.gen_conf = config['inference']['sample']
+        self._inference_max_length = config.get('inference', {}).get('max_length', self.gen_conf.get('max_length'))
 
     def predict(self, input_features):
         inputs = self.get_prompt(input_features)
         model_inputs = {k: v.to(self.device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
-        outputs = self.vlm.generate(
-            **model_inputs,
-            max_length=self.gen_conf['max_length'],
-            do_sample=True,
-            temperature=self.gen_conf['temperature'],
-            top_k=self.gen_conf['top_k'],
-            top_p=self.gen_conf['top_p'],
-        )
+        gen_kwargs = {
+            "do_sample": True,
+            "temperature": self.gen_conf['temperature'],
+            "top_k": self.gen_conf['top_k'],
+            "top_p": self.gen_conf['top_p'],
+        }
+        if self.gen_conf.get('max_new_tokens') is not None:
+            gen_kwargs["max_new_tokens"] = int(self.gen_conf['max_new_tokens'])
+        else:
+            gen_kwargs["max_length"] = self._inference_max_length
+
+        outputs = self.vlm.generate(**model_inputs, **gen_kwargs)
 
         outputs_trimmed = [
             out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, outputs)
@@ -519,8 +895,18 @@ class AutoVLA(torch.nn.Module):
         #     print(self.processor.decode(outputs_trimmed))
         #     print("no cot")
         actions_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
-
-        trajectory = self.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens)[0, 1:]
+        decoded = self.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens)
+        if isinstance(decoded, torch.Tensor) and decoded.ndim == 3 and decoded.shape[2] == 3 and decoded.shape[0] > 0:
+            trajectory = decoded[0, 1:]
+        else:
+            trajectory = torch.zeros((0, 3), dtype=torch.float32)
+        if trajectory.shape[0] == 0:
+            trajectory = torch.zeros((self._trajectory_num_poses, 3), dtype=torch.float32)
+        elif trajectory.shape[0] < self._trajectory_num_poses:
+            pad = trajectory[-1:].repeat(self._trajectory_num_poses - trajectory.shape[0], 1)
+            trajectory = torch.cat([trajectory, pad], dim=0)
+        else:
+            trajectory = trajectory[: self._trajectory_num_poses]
 
         return trajectory, cot_results
     
