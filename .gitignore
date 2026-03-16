@@ -19,3 +19,10 @@
 
 # temp
 temp/*
+task/
+logs/
+.codex/
+runs/
+tensorboard/
+codebook_cache/*.pkl
+docs/superpowers/plans/*
