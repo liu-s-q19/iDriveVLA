@@ -1,0 +1,59 @@
+upstream:
+  navsim_root: /data/liushiqi/navsim
+  config_dir: /data/liushiqi/navsim/navsim/planning/script/config/pdm_scoring
+  config_name: default_run_pdm_score
+  overrides:
+    - train_test_split=navtest
+    - worker=single_machine_thread_pool
+    - worker.use_process_pool=true
+    - worker.max_workers=16
+    - navsim_log_path=/readOnly/df_l2.9/navsim/test_navsim_logs/test
+    - original_sensor_path=/readOnly/df_l2.9/navsim/test_sensor_blobs/test
+    - synthetic_sensor_path=/readOnly/df_l2.9/navsim/navhard_two_stage/sensor_blobs
+    - synthetic_scenes_path=/readOnly/df_l2.9/navsim/navhard_two_stage/synthetic_scene_pickles
+    - scorer=pdm_scorer
+    - agent=constant_velocity_agent
+    - metric_cache_path=/data/dataset/navsim/metric_cache_v2/navtest_full_2026-03-07_15-40-49
+    - output_dir=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_sft_20260312_epoch4/navtest_default
+
+run:
+  env_name: autolsqv2
+  output_dir: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_sft_20260312_epoch4
+  log_path: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_sft_20260312_epoch4/run_navsimv2_epdms_standard_autovla_sft_20260312_epoch4.log
+  env_vars:
+    NUPLAN_MAPS_ROOT: /data/dataset/navsim/maps
+    OPENSCENE_DATA_ROOT: /data/dataset/navsim
+    NUPLAN_MAP_VERSION: nuplan-maps-v1.0
+
+evaluation:
+  mode: autovla_one_stage
+
+model:
+  config_path: /data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-mix-sft.yaml
+  checkpoint_path: /data/liushiqi/AutoVLA/runs/sft/2026-03-12_06-03-13/epoch=4-loss=0.9352.ckpt
+  sensor_data_path: /
+  dataset_name: navsim
+  trajectory_sampling:
+    num_poses: 10
+    interval_length: 0.5
+  lora_conf:
+    use_lora: null
+    task_type: CAUSAL_LM
+    target_modules: [q_proj, v_proj, k_proj, o_proj]
+    r: 8
+    lora_alpha: 8
+    lora_dropout: 0.1
+    bias: none
+
+traffic_agents:
+  mode: non_reactive
+
+validation:
+  enable_metric_cache_schema_check: true
+  metric_cache_sample_count: 3
+  metric_cache_required_attrs:
+    - current_tracked_objects
+    - past_detections_tracks
+  metric_cache_optional_attrs:
+    - map_parameters
+    - past_human_trajectory
