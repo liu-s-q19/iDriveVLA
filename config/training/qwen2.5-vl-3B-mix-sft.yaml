@@ -53,6 +53,7 @@ inference:
   num_workers: 2
   sample:
     max_length: 2048
-    temperature: 0.8
-    top_k: 20
-    top_p: 0.2
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    do_sample: true
