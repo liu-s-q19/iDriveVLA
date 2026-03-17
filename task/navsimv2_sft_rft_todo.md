@@ -222,14 +222,17 @@ bash scripts/run_rft.sh
 - 本次初始化 SFT ckpt：
   - `/data/liushiqi/AutoVLA/runs/sft/2026-03-12_06-03-13/epoch=4-loss=0.9352.ckpt`
 - 本次专用配置：
-  - `config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-sft20260312e4.yaml`
+  - `config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4.yaml`
+- 命名说明：
+  - 现已将专用 RFT 配置文件统一改名为 `...-rft20260312e4.yaml`。
+  - 2026-03-16 当天已经启动过的历史 run/log/tensorboard 产物名仍保留 `...sft20260312e4...`，因为它们是改名前的真实产物名，不再回写篡改。
 - 启动命令：
 ```bash
 cd /data/liushiqi/AutoVLA
 CONDA_ENV=autolsqv2 \
 PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
 GPU_LIST=0,1,2,3,4,5,6,7 \
-RFT_CONFIG=training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-sft20260312e4 \
+RFT_CONFIG=training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4 \
 bash scripts/run_rft.sh
 ```
 - 关键监控项：
@@ -511,7 +514,7 @@ env CONDA_ENV=autolsqv2 \
   - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-mix-sft.yaml`
   - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot.yaml`
   - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast.yaml`
-  - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-sft20260312e4.yaml`
+  - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4.yaml`
   - `/data/liushiqi/AutoVLA/config/eval/qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative-model.yaml`
 - 说明：
   - `SFT generated_action_probe` 也对齐到训练采样口径，避免训练中“实际生成 action 数”统计和训练采样策略不一致。
@@ -963,13 +966,68 @@ nohup bash /data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_remote33_s
   - AutoVLA 标准口径 full `navtest` 已完成，不再是“运行中”状态。
   - 当前该 SFT 最终 ckpt 在标准口径 full `navtest` 上，结果显著高于同目录中先前的 baseline `constant_velocity_agent` 结果（`0.3233531830113996`）。
 
+### RFT step6000 验收计划（2026-03-17）
+- 验收 ckpt：
+  - `/data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft20260312e4_ip190_2026-03-16_13-23-06/ckpt/rft-step6000-reward6.2188.ckpt`
+- 统一命名口径：
+  - 本轮新建验收配置、输出目录、tmux session 一律使用 `rft`
+  - 历史 run/log/tensorboard 名仍保留旧的 `sft20260312e4`
+- navtest 标准 EPDMS 配置：
+  - `/data/liushiqi/AutoVLA/config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml`
+- navhard two-stage 配置：
+  - `/data/liushiqi/AutoVLA/config/eval/navhard_two_stage_autovla_rft20260312_step6000.yaml`
+- 计划启动节点：
+  - `10.199.7.190`
+- navtest 标准 wrapper 启动模板：
+```bash
+ssh -p 2289 root@10.199.7.190 '
+cd /data/liushiqi/AutoVLA &&
+TS=$(date -u +%F_%H-%M-%S) &&
+SESSION=navtest_epdms_rft20260312_step6000 &&
+OUT=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/navtest_full_${TS}_190 &&
+tmux new-session -d -s ${SESSION} "
+cd /data/liushiqi/AutoVLA &&
+mkdir -p ${OUT} &&
+env PYTHONPATH=/data/liushiqi/AutoVLA \
+NUPLAN_MAPS_ROOT=/data/dataset/navsim/maps \
+OPENSCENE_DATA_ROOT=/data/dataset/navsim \
+NUPLAN_MAP_VERSION=nuplan-maps-v1.0 \
+/data/miniconda/envs/autolsqv2/bin/python tools/eval/run_navsimv2_epdms_standard.py \
+  --config config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml \
+  --override output_dir=${OUT} \
+  2>&1 | tee ${OUT}/launcher_stdout.log
+"
+'
+```
+- 说明：
+  - 这里是当前仓库内真实可用的标准 `navtest` 入口，不是 repo 化的 8GPU shard launcher。
+  - 若后续要把 `navtest` 也做成正式 8GPU 分片，应单独建脚本，不要继续在 task 中写伪 8 卡命令。
+- navhard 8 卡启动模板：
+```bash
+ssh -p 2289 root@10.199.7.190 '
+cd /data/liushiqi/AutoVLA &&
+TS=$(date -u +%F_%H-%M-%S) &&
+SESSION=navhard_epdms_rft20260312_step6000 &&
+PLAN_DIR=/data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_rft20260312_step6000/plan_${TS}_190 &&
+tmux new-session -d -s ${SESSION} "
+cd /data/liushiqi/AutoVLA &&
+PLAN_DIR=${PLAN_DIR} \
+CONFIG_PATH=/data/liushiqi/AutoVLA/config/eval/navhard_two_stage_autovla_rft20260312_step6000.yaml \
+PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
+GPU_LIST=0,1,2,3,4,5,6,7 \
+bash scripts/eval/run_navhard_two_stage_autovla_8gpu.sh \
+  2>&1 | tee ${PLAN_DIR}_launcher_stdout.log
+"
+'
+```
+
 ### NavSim v2 RL 统一采样口径后重启记录（2026-03-16）
 - 目的：
   - 使当前 NavSim v2 RL run 与新统一口径一致：
     - 训练：`do_sample=true, temperature=1.0, top_p=1.0, top_k=0`
     - 推理/评测：`temperature=0.2, top_p=1.0, top_k=20`
 - 使用配置：
-  - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-sft20260312e4.yaml`
+  - `/data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4.yaml`
 - 停止前旧 run 状态：
   - tmux：`rl_navsimv2_sft20260312e4_ip190`
   - 旧日志：
@@ -1001,7 +1059,7 @@ cd /data/liushiqi/AutoVLA &&
 env CONDA_ENV=autolsqv2 \
 PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
 GPU_LIST=0,1,2,3,4,5,6,7 \
-RFT_CONFIG=training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-sft20260312e4 \
+RFT_CONFIG=training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4 \
 RFT_RUN_ID=grpo_navsimv2_sft20260312e4_ip190_${TS} \
 stdbuf -oL -eL bash scripts/run_rft.sh 2>&1 | tee -a ${LOG}
 "
