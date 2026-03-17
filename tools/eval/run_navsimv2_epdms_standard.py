@@ -9,6 +9,7 @@ import pickle
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -346,9 +347,16 @@ def _evaluate_autovla_one_stage_tokens(
     trajectory_interval: float,
     trajectory_cls: Any,
     payload_builder: Any,
+    progress_every: int = 0,
+    shard_name: str = "navtest",
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
-    for token in tokens:
+    total = len(tokens)
+    started_at = time.time()
+    successful = 0
+    failed = 0
+    progress_every = int(progress_every)
+    for idx, token in enumerate(tokens, start=1):
         row: Dict[str, Any] = {"token": token, "valid": True}
         try:
             metric_cache = metric_cache_loader.get_from_token(token)
@@ -397,7 +405,25 @@ def _evaluate_autovla_one_stage_tokens(
             LOGGER.warning("AutoVLA standard evaluation failed for token=%s", token)
             LOGGER.warning(traceback.format_exc())
             row["valid"] = False
+            failed += 1
+        else:
+            successful += 1
         rows.append(row)
+
+        if progress_every > 0 and (idx % progress_every == 0 or idx == total):
+            elapsed = max(time.time() - started_at, 1e-6)
+            eta_seconds = max((total - idx) * (elapsed / idx), 0.0)
+            LOGGER.info(
+                "Progress %s %d/%d success=%d failed=%d elapsed=%.1fs eta=%.1fs last_token=%s",
+                shard_name,
+                idx,
+                total,
+                successful,
+                failed,
+                elapsed,
+                eta_seconds,
+                token,
+            )
 
     pdm_score_df = pd.DataFrame(rows)
     return _append_average_row(pdm_score_df)
@@ -420,6 +446,8 @@ def _run_autovla_one_stage_from_components(
     trajectory_interval: float,
     trajectory_cls: Any,
     payload_builder: Any,
+    progress_every: int = 0,
+    shard_name: str = "navtest",
 ) -> int:
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -439,6 +467,8 @@ def _run_autovla_one_stage_from_components(
         trajectory_interval=trajectory_interval,
         trajectory_cls=trajectory_cls,
         payload_builder=payload_builder,
+        progress_every=progress_every,
+        shard_name=shard_name,
     )
     if "score" not in pdm_score_df.columns and "pdm_score" in pdm_score_df.columns:
         pdm_score_df["score"] = pdm_score_df["pdm_score"]
@@ -550,6 +580,8 @@ def _run_autovla_one_stage(
 
     model_cfg = OmegaConf.create(cfg["model"])
     predictor = AutoVLAPredictor(model_cfg, model_cfg.trajectory_sampling)
+    progress_every = int(cfg.get("evaluation", {}).get("progress_every_tokens", 50) or 0)
+    shard_name = Path(str(hydra_cfg.output_dir)).name
 
     return _run_autovla_one_stage_from_components(
         tokens=tokens_to_evaluate,
@@ -567,6 +599,8 @@ def _run_autovla_one_stage(
         trajectory_interval=float(model_cfg.trajectory_sampling.interval_length),
         trajectory_cls=Trajectory,
         payload_builder=_scene_to_autovla_payload,
+        progress_every=progress_every,
+        shard_name=shard_name,
     )
 
 

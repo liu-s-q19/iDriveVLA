@@ -978,30 +978,27 @@ nohup bash /data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_remote33_s
   - `/data/liushiqi/AutoVLA/config/eval/navhard_two_stage_autovla_rft20260312_step6000.yaml`
 - 计划启动节点：
   - `10.199.7.190`
-- navtest 标准 wrapper 启动模板：
+- navtest 标准 EPDMS 8 卡启动模板：
 ```bash
 ssh -p 2289 root@10.199.7.190 '
 cd /data/liushiqi/AutoVLA &&
 TS=$(date -u +%F_%H-%M-%S) &&
 SESSION=navtest_epdms_rft20260312_step6000 &&
-OUT=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/navtest_full_${TS}_190 &&
+PLAN_DIR=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/plan_${TS}_190 &&
 tmux new-session -d -s ${SESSION} "
 cd /data/liushiqi/AutoVLA &&
-mkdir -p ${OUT} &&
-env PYTHONPATH=/data/liushiqi/AutoVLA \
-NUPLAN_MAPS_ROOT=/data/dataset/navsim/maps \
-OPENSCENE_DATA_ROOT=/data/dataset/navsim \
-NUPLAN_MAP_VERSION=nuplan-maps-v1.0 \
-/data/miniconda/envs/autolsqv2/bin/python tools/eval/run_navsimv2_epdms_standard.py \
-  --config config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml \
-  --override output_dir=${OUT} \
-  2>&1 | tee ${OUT}/launcher_stdout.log
+PLAN_DIR=${PLAN_DIR} \
+CONFIG_PATH=/data/liushiqi/AutoVLA/config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml \
+PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
+GPU_LIST=0,1,2,3,4,5,6,7 \
+bash scripts/eval/run_navtest_epdms_standard_8gpu.sh \
+  2>&1 | tee ${PLAN_DIR}_launcher_stdout.log
 "
 '
 ```
 - 说明：
-  - 这里是当前仓库内真实可用的标准 `navtest` 入口，不是 repo 化的 8GPU shard launcher。
-  - 若后续要把 `navtest` 也做成正式 8GPU 分片，应单独建脚本，不要继续在 task 中写伪 8 卡命令。
+  - 已新增正式 8GPU shard launcher：`scripts/eval/run_navtest_epdms_standard_8gpu.sh`
+  - `run_navsimv2_epdms_standard.py` 在 `autovla_one_stage` 模式下默认每 `50` 个 token 打一次进度日志。
 - navhard 8 卡启动模板：
 ```bash
 ssh -p 2289 root@10.199.7.190 '

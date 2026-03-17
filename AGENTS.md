@@ -42,9 +42,11 @@ bash scripts/run_rft.sh
 ### Navtest Standard EPDMS
 ```bash
 cd /data/liushiqi/AutoVLA
-/data/miniconda/envs/autolsqv2/bin/python tools/eval/run_navsimv2_epdms_standard.py \
-  --config config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml \
-  --override output_dir=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/navtest_full_$(date -u +%F_%H-%M-%S)
+PLAN_DIR=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/plan_$(date -u +%F_%H-%M-%S) \
+CONFIG_PATH=/data/liushiqi/AutoVLA/config/eval/navsimv2_epdms_standard_autovla_rft20260312_step6000.yaml \
+PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
+GPU_LIST=0,1,2,3,4,5,6,7 \
+bash scripts/eval/run_navtest_epdms_standard_8gpu.sh
 ```
 
 ### Navhard Two-Stage 8GPU
@@ -58,7 +60,9 @@ bash scripts/eval/run_navhard_two_stage_autovla_8gpu.sh
 ```
 
 ## Notes
-- `navtest` 当前仓库内只有标准 wrapper 单入口命令，尚未 repo 化为正式 8GPU shard launcher。
+- `navtest` 8GPU 正式 launcher：
+  - `scripts/eval/run_navtest_epdms_standard_8gpu.sh`
+- `run_navsimv2_epdms_standard.py` 默认每 `50` 个 token 输出一次进度日志。
 - 历史 `navtest` 多卡拆分运行记录保留在：
   - `task/archive/process/navsimv2_standard_epdms_process.md`
 - 已完成任务摘要统一放到：

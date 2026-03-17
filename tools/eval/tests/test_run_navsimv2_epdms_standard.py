@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+import logging
 
 import pandas as pd
 
@@ -223,6 +224,95 @@ def test_apply_process_env_sets_configured_variables(monkeypatch):
 
     assert os.environ["NUPLAN_MAPS_ROOT"] == "/data/dataset/navsim/maps"
     assert os.environ["OPENSCENE_DATA_ROOT"] == "/data/dataset/navsim"
+
+
+def test_evaluate_autovla_one_stage_tokens_logs_periodic_progress(caplog):
+    class _Predictor:
+        def predict(self, payload):
+            return payload["predicted_poses"], None
+
+    class _Trajectory:
+        def __init__(self, poses, trajectory_sampling):
+            self.poses = poses
+            self.trajectory_sampling = trajectory_sampling
+
+    def payload_builder(token, scene, sensor_root, dataset_name, trajectory_num_poses):
+        return {
+            "token": token,
+            "predicted_poses": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        }
+
+    def pdm_score_fn(metric_cache, model_trajectory, future_sampling, simulator, scorer, traffic_agents_policy):
+        return pd.DataFrame([{"score": 1.0, "invalid": 0}])
+
+    with caplog.at_level(logging.INFO, logger=mod.LOGGER.name):
+        mod._evaluate_autovla_one_stage_tokens(
+            tokens=["tok_a", "tok_b", "tok_c", "tok_d", "tok_e"],
+            scene_loader=_FakeSceneLoader(),
+            metric_cache_loader=_FakeMetricCacheLoader(),
+            predictor=_Predictor(),
+            pdm_score_fn=pdm_score_fn,
+            simulator=SimpleNamespace(proposal_sampling="proposal_sampling"),
+            scorer=object(),
+            traffic_agents_policy=object(),
+            sensor_root=Path("/tmp/sensors"),
+            dataset_name="navsim",
+            trajectory_num_poses=2,
+            trajectory_interval=0.5,
+            trajectory_cls=_Trajectory,
+            payload_builder=payload_builder,
+            progress_every=2,
+            shard_name="shard_03",
+        )
+
+    progress_logs = [record.message for record in caplog.records if "Progress shard_03" in record.message]
+    assert len(progress_logs) == 3
+    assert "2/5" in progress_logs[0]
+    assert "4/5" in progress_logs[1]
+    assert "5/5" in progress_logs[2]
+    assert "last_token=tok_e" in progress_logs[2]
+
+
+def test_evaluate_autovla_one_stage_tokens_disables_progress_when_interval_zero(caplog):
+    class _Predictor:
+        def predict(self, payload):
+            return payload["predicted_poses"], None
+
+    class _Trajectory:
+        def __init__(self, poses, trajectory_sampling):
+            self.poses = poses
+            self.trajectory_sampling = trajectory_sampling
+
+    def payload_builder(token, scene, sensor_root, dataset_name, trajectory_num_poses):
+        return {
+            "token": token,
+            "predicted_poses": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        }
+
+    def pdm_score_fn(metric_cache, model_trajectory, future_sampling, simulator, scorer, traffic_agents_policy):
+        return pd.DataFrame([{"score": 1.0, "invalid": 0}])
+
+    with caplog.at_level(logging.INFO, logger=mod.LOGGER.name):
+        mod._evaluate_autovla_one_stage_tokens(
+            tokens=["tok_a", "tok_b"],
+            scene_loader=_FakeSceneLoader(),
+            metric_cache_loader=_FakeMetricCacheLoader(),
+            predictor=_Predictor(),
+            pdm_score_fn=pdm_score_fn,
+            simulator=SimpleNamespace(proposal_sampling="proposal_sampling"),
+            scorer=object(),
+            traffic_agents_policy=object(),
+            sensor_root=Path("/tmp/sensors"),
+            dataset_name="navsim",
+            trajectory_num_poses=2,
+            trajectory_interval=0.5,
+            trajectory_cls=_Trajectory,
+            payload_builder=payload_builder,
+            progress_every=0,
+            shard_name="shard_00",
+        )
+
+    assert not [record.message for record in caplog.records if "Progress shard_00" in record.message]
 
 
 def test_run_autovla_one_stage_from_components_uses_pdm_score_when_score_missing(tmp_path):
