@@ -25,7 +25,7 @@ cd /data/liushiqi/AutoVLA
 ```
 
 ## 结果
-- 标准 baseline full navtest：
+- `NavSim v2` 标准 `constant_velocity` baseline full `navtest`：
   - `score_mean = 0.3233531830113996`
 - AutoVLA 标准口径 full navtest：
   - `successful = 12146`

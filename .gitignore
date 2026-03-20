@@ -22,6 +22,8 @@ temp/*
 task/
 logs/
 .codex/
+.worktrees/
+task_assets/
 runs/
 tensorboard/
 codebook_cache/*.pkl
