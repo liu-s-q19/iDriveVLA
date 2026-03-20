@@ -43,9 +43,12 @@ from torch.utils.data import DataLoader
 
 from dataset_utils.sft_dataset import SFTDataset, DataCollator
 from models.autovla import SFTAutoVLA
+from models.utils.model_backends import detect_model_family
+from models.utils.model_backends import load_processor_for_model
+from models.utils.model_backends import maybe_wrap_with_lora
+from models.utils.model_backends import resolve_transformer_layer_classes
+from models.utils.model_backends import set_gradient_checkpointing_for_model
 from models.utils.trainer_progress import build_tqdm_progress_bar
-from transformers import AutoProcessor
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
 import datetime
 
 torch.set_float32_matmul_precision('high')
@@ -103,7 +106,7 @@ if __name__ == "__main__":
     )
 
     # Model, dataset, and dataloader
-    processor = AutoProcessor.from_pretrained(config['model']['pretrained_model_path'], use_fast=True)
+    processor = load_processor_for_model(config['model']['pretrained_model_path'])
     
     # Get using_cot setting from config (default to True if not specified)
     using_cot = config['model']['use_cot']
@@ -122,14 +125,21 @@ if __name__ == "__main__":
     val_dataset = SFTDataset(config['data']['val'], config['model'], processor, using_cot=using_cot)
 
     model = SFTAutoVLA(config)
+    model.autovla.vlm, sft_lora_enabled = maybe_wrap_with_lora(
+        model.autovla.vlm,
+        config.get("model", {}).get("lora"),
+    )
+    if sft_lora_enabled:
+        trainable_params = sum(p.numel() for p in model.autovla.vlm.parameters() if p.requires_grad)
+        print(f"Using LoRA mode for SFT training. trainable_params={trainable_params}")
 
     # Gradient checkpointing can reduce memory but significantly slows throughput.
     # Keep it configurable so large multi-node jobs can prioritize speed.
     use_gradient_checkpointing = bool(training_cfg.get("gradient_checkpointing", True))
-    if use_gradient_checkpointing:
-        model.autovla.vlm.model.gradient_checkpointing_enable()
-    else:
-        model.autovla.vlm.model.gradient_checkpointing_disable()
+    set_gradient_checkpointing_for_model(
+        model.autovla.vlm,
+        enabled=use_gradient_checkpointing,
+    )
 
     if hasattr(model.autovla.vlm, "config") and hasattr(model.autovla.vlm.config, "use_cache"):
         model.autovla.vlm.config.use_cache = not use_gradient_checkpointing
@@ -188,9 +198,11 @@ if __name__ == "__main__":
     # Distributed strategy
     wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls={
-            Qwen2_5_VLDecoderLayer
-        },
+        transformer_layer_cls=set(
+            resolve_transformer_layer_classes(
+                detect_model_family(config['model']['pretrained_model_path'])
+            )
+        ),
     )
     strategy_name = str(training_cfg.get("distributed_strategy", "fsdp")).lower()
     if strategy_name == "ddp":

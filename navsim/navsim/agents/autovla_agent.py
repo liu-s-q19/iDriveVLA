@@ -230,9 +230,10 @@ class TokenProcessor(torch.nn.Module):
 class AutoVLAAgentFeatureBuilder(AbstractFeatureBuilder):
     """Input feature builder of AutoVLA Agent."""
 
-    def __init__(self, sensor_data_path: Optional[str] = None):
+    def __init__(self, sensor_data_path: Optional[str] = None, trajectory_num_poses: Optional[int] = None):
         """Initializes the feature builder."""
         self.sensor_data_path = sensor_data_path
+        self.trajectory_num_poses = trajectory_num_poses
 
     def get_unique_name(self) -> str:
         """Inherited, see superclass."""
@@ -243,8 +244,10 @@ class AutoVLAAgentFeatureBuilder(AbstractFeatureBuilder):
         command = scene_data['instruction']
         velocity = scene_data['velocity']
         acceleration = scene_data['acceleration']
-        gt_trajectory = scene_data['gt_trajectory']
-        history_trajectory = scene_data['gt_trajectory']
+        gt_trajectory = list(scene_data['gt_trajectory'])
+        if self.trajectory_num_poses is not None:
+            gt_trajectory = gt_trajectory[: int(self.trajectory_num_poses)]
+        history_trajectory = list(gt_trajectory)
         dataset_name = scene_data['dataset_name']
 
         front_cam = scene_data['front_camera_paths']
@@ -308,7 +311,7 @@ class TrajectoryTargetBuilder(AbstractTargetBuilder):
 
     def compute_targets(self, scene_data) -> Dict:
         """Inherited, see superclass."""
-        gt_trajectory = np.array(scene_data['gt_trajectory'])
+        gt_trajectory = np.array(scene_data['gt_trajectory'])[: int(self._trajectory_sampling.num_poses)]
         future_trajectory = Trajectory(
             gt_trajectory, 
             TrajectorySampling(
@@ -420,7 +423,12 @@ class AutoVLAAgent(AbstractAgent):
 
     def get_feature_builders(self) -> List[AbstractFeatureBuilder]:
         """Inherited, see superclass."""
-        return [AutoVLAAgentFeatureBuilder(sensor_data_path=self.sensor_data_path)]
+        return [
+            AutoVLAAgentFeatureBuilder(
+                sensor_data_path=self.sensor_data_path,
+                trajectory_num_poses=int(self._trajectory_sampling.num_poses),
+            )
+        ]
     
     def compute_trajectory(self, scene_data) -> Trajectory:
         """

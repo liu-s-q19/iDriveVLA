@@ -150,7 +150,7 @@ class SFTDataset(Dataset):
                     "text": (
                         "You are an Advanced Driver Assistance and Full Self-Driving System. "
                         "You will be provided with video observations from the ego vehicle's surrounding cameras, along with the vehicle's current dynamic states. "
-                        "Your task is to predict the most appropriate driving action for the next five seconds."
+                        "Your task is to predict the most appropriate driving action for the next four seconds."
                     )
                 }
             ]
@@ -163,7 +163,7 @@ class SFTDataset(Dataset):
                     "text": (
                         "You are an Advanced Driver Assistance and Full Self-Driving System. "
                         "You will receive visual observations from the ego vehicle's cameras and dynamic information about the vehicle's current state. "
-                        "Your task is to predict the optimal driving action for the next five seconds.\n\n"
+                        "Your task is to predict the optimal driving action for the next four seconds.\n\n"
                         "First, carefully analyze the surrounding environment by considering traffic lights, the movements of other vehicles and pedestrians, lane markings, and any other relevant factors.\n\n"
                         "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving action. Otherwise, you may directly predict the final driving action.\n\n"
                         "Present the final action clearly after your reasoning steps."
@@ -301,7 +301,7 @@ class SFTDataset(Dataset):
                 "type": "text",
                 "text": (
                     f"The current velocity of the vehicle is {velocity:.3f} m/s, and the current acceleration is {acceleration:.3f} m/s². "
-                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next five seconds."
+                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next four seconds."
                 )
             },
         ]
@@ -326,13 +326,21 @@ class SFTDataset(Dataset):
         ]
 
 
-        # process the images and messages
-        image_inputs, video_inputs = process_vision_info(messages)
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
-        )
-    
-        inputs = {'text': text, 'image_inputs': image_inputs, 'video_inputs': video_inputs}
+        if getattr(self.processor, "family", "") == "internvl_chat":
+            image_paths = []
+            for item in user_content:
+                if item.get("type") == "video":
+                    image_paths.extend(item.get("video", []))
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = {'text': text, 'image_paths': image_paths}
+        else:
+            image_inputs, video_inputs = process_vision_info(messages)
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
+            )
+            inputs = {'text': text, 'image_inputs': image_inputs, 'video_inputs': video_inputs}
 
         # trajectory information
         inputs['gt_trajectory'] = gt_raw_trajectory
@@ -359,24 +367,29 @@ class DataCollator:
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # Extract text inputs
         text = [batch["text"] for batch in features]
-        
-        # Process video and image inputs
-        video_inputs = []
-        image_inputs = []
-        has_cot = []
-        for batch in features:
-            video_inputs.extend(batch["video_inputs"])
-            image_inputs.append(batch["image_inputs"])
-            has_cot.append(batch["has_cot"])
-        
-        
-        batch = self.processor(
-            text=text,
-            images=image_inputs if image_inputs[0] is not None else None,
-            videos=video_inputs if video_inputs[0] is not None else None,
-            padding=True,
-            return_tensors="pt",
-        )
+        has_cot = [batch["has_cot"] for batch in features]
+
+        if getattr(self.processor, "family", "") == "internvl_chat":
+            image_paths = [batch["image_paths"] for batch in features]
+            batch = self.processor.build_batch(
+                text=text,
+                image_paths=image_paths,
+                padding=True,
+                return_tensors="pt",
+            )
+        else:
+            video_inputs = []
+            image_inputs = []
+            for batch in features:
+                video_inputs.extend(batch["video_inputs"])
+                image_inputs.append(batch["image_inputs"])
+            batch = self.processor(
+                text=text,
+                images=image_inputs if image_inputs[0] is not None else None,
+                videos=video_inputs if video_inputs[0] is not None else None,
+                padding=True,
+                return_tensors="pt",
+            )
 
         labels = batch["input_ids"].clone()
 

@@ -11,9 +11,22 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List
 from torch.distributed.fsdp import StateDictType
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import AutoProcessor
 from qwen_vl_utils import process_vision_info
 from models.action_tokenizer import ActionTokenizer
+from models.utils.action_answer_protocol import parse_action_answer_completion
+from models.utils.action_answer_protocol import summarize_group_outcomes
+from models.utils.model_backends import detect_model_family
+from models.utils.model_backends import get_language_backbone
+from models.utils.model_backends import get_vision_backbone
+from models.utils.model_backends import load_processor_for_model
+from models.utils.model_backends import load_causal_lm_for_model
+from models.utils.model_backends import resize_token_embeddings_for_model
+from models.utils.model_backends import align_vision_tensor_dtypes
+from models.utils.model_backends import initialize_model_runtime_state
+from models.utils.model_backends import filter_generate_inputs_for_model
+from models.utils.model_backends import resolve_generate_length_kwargs
+from models.utils.model_backends import get_input_ids_tensor
 from models.utils.grpo_metrics import masked_token_mean
 from models.utils.grpo_log_keys import progress_bar_metric_names
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -27,6 +40,16 @@ except Exception as exc:
     # SFT inference/evaluation should not hard-fail on GRPO-only reward dependencies.
     PDM_Reward = None
     _PDM_REWARD_IMPORT_ERROR = exc
+
+
+_PROTOCOL_INVALID_REASON_CODES = {
+    "": 0,
+    "missing_answer_block": 1,
+    "multiple_answer_blocks": 2,
+    "answer_block_not_at_tail": 3,
+    "action_count_mismatch": 4,
+    "not_run": 5,
+}
 
 
 class GRPOAutoVLA(pl.LightningModule):
@@ -71,6 +94,9 @@ class GRPOAutoVLA(pl.LightningModule):
         self._debug_compare_outputs = bool(config.get('training', {}).get('debug_compare_outputs', False))
         self._debug_compare_steps = int(config.get('training', {}).get('debug_compare_steps', 3))
         self._debug_text_preview_chars = int(config.get('training', {}).get('debug_text_preview_chars', 120))
+        self._action_answer_protocol_enabled = bool(
+            config.get('model', {}).get('action_answer_protocol', {}).get('enabled', False)
+        )
         advantage_cfg = config.get('rl', {}).get('advantage', {})
         self._adv_group_std_eps = float(advantage_cfg.get('group_std_eps', 1e-6))
         self._adv_fallback_mode = str(advantage_cfg.get('fallback_mode', 'reward')).lower()
@@ -125,9 +151,19 @@ class GRPOAutoVLA(pl.LightningModule):
             self._log_sample_health(sample, device=reward.device)
             
             # Normalize the rewards to compute the advantage.
-            groupped_rewards = self.all_gather(reward)
+            groupped_rewards = self.all_gather(reward).flatten()
             group_mean = groupped_rewards.mean()
             group_std = groupped_rewards.std(unbiased=False)
+            local_valid = torch.tensor(
+                1.0 if bool(sample.get("reward_input_valid", True)) else 0.0,
+                device=reward.device,
+            )
+            grouped_valid = self.all_gather(local_valid).flatten()
+            group_summary = summarize_group_outcomes(
+                grouped_rewards=groupped_rewards,
+                grouped_valid_mask=grouped_valid,
+                group_std_eps=self._adv_group_std_eps,
+            )
             grouped_seeds = None
             if self._log_grouped_rewards and self._last_sampling_seed is not None:
                 local_seed = torch.tensor(float(self._last_sampling_seed), device=reward.device)
@@ -139,12 +175,15 @@ class GRPOAutoVLA(pl.LightningModule):
                 print(f"group_reward_std={group_std.item():.6f}")
             self._debug_compare_group_outputs(sample, groupped_rewards, group_std)
             self.log("group_reward_std", group_std, sync_dist=False, prog_bar=("group_reward_std" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            self.log("group_valid_count", group_summary["group_valid_count"], sync_dist=False, on_step=True, on_epoch=False)
+            self.log("group_all_invalid", group_summary["group_all_invalid"], sync_dist=False, on_step=True, on_epoch=False)
+            self.log("group_all_same_reward", group_summary["group_all_same_reward"], sync_dist=False, on_step=True, on_epoch=False)
             fallback_used = 0.0
-            if group_std.detach().item() < self._adv_group_std_eps:
-                advantage = self._fallback_advantage(reward)
+            if group_summary["use_zero_advantage"]:
+                advantage = torch.zeros_like(reward)
                 fallback_used = 1.0
                 if self._log_grouped_rewards and self.global_rank == 0:
-                    print(f"group_advantage_fallback={self._adv_fallback_mode}")
+                    print("group_advantage_fallback=zero")
             else:
                 advantage = (reward - group_mean) / (group_std + 1e-4)
             self.log("group_adv_fallback", fallback_used, sync_dist=False, prog_bar=("group_adv_fallback" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
@@ -252,6 +291,40 @@ class GRPOAutoVLA(pl.LightningModule):
         arr = tensor.detach().cpu().contiguous().numpy()
         return self._hash_bytes(arr.tobytes())
 
+    def _parse_action_answer_completion(self, completion_ids: torch.Tensor, tokenizer):
+        return parse_action_answer_completion(
+            completion_ids.detach().cpu(),
+            tokenizer=tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=int(self.trajectory_sampling.num_poses),
+        )
+
+    @staticmethod
+    def _invalid_reason_code(reason: str) -> int:
+        return int(_PROTOCOL_INVALID_REASON_CODES.get(str(reason), max(_PROTOCOL_INVALID_REASON_CODES.values()) + 1))
+
+    def _action_tokens_tensor(self, action_token_ids: List[int], device: torch.device) -> torch.Tensor:
+        if not action_token_ids:
+            return torch.empty((0,), dtype=torch.long, device=device)
+        return torch.tensor(action_token_ids, dtype=torch.long, device=device)
+
+    def _normalize_action_tokens_default(self, action_tokens: torch.Tensor, device: torch.device) -> torch.Tensor:
+        if len(action_tokens) > self.trajectory_sampling.num_poses:
+            return action_tokens[: self.trajectory_sampling.num_poses]
+        if len(action_tokens) < self.trajectory_sampling.num_poses:
+            return torch.cat(
+                [action_tokens, torch.zeros(self.trajectory_sampling.num_poses - len(action_tokens), device=device)]
+            ).long()
+        return action_tokens.long()
+
+    def _zero_padded_action_tokens(self, device: torch.device) -> torch.Tensor:
+        return torch.zeros(self.trajectory_sampling.num_poses, dtype=torch.long, device=device)
+
+    def _trajectory_from_action_tokens(self, action_tokens: torch.Tensor) -> Trajectory:
+        decode_tokens = action_tokens.detach().cpu()
+        decoded_traj = self.autovla.action_tokenizer.decode_token_ids_to_trajectory(decode_tokens)[0, 1:]
+        return Trajectory(decoded_traj.cpu().numpy(), self.trajectory_sampling)
+
     def _extract_action_tokens_from_completion(self, completion_ids: torch.Tensor, tokenizer) -> torch.Tensor:
         valid_action_ids = []
         for tok in completion_ids.tolist():
@@ -292,6 +365,9 @@ class GRPOAutoVLA(pl.LightningModule):
             "trajectory_hash": sample.get("trajectory_hash"),
             "action_candidate_count": sample.get("action_candidate_count"),
             "action_tokens_len": sample.get("action_tokens_len"),
+            "answer_action_tokens_len": sample.get("answer_action_tokens_len"),
+            "answer_block_valid": sample.get("answer_block_valid"),
+            "reward_invalid_reason": sample.get("reward_invalid_reason"),
             "action_nonzero_count": sample.get("action_nonzero_count"),
             "completion_preview": sample.get("completion_preview"),
             "sampling_seed": sample.get("sampling_seed"),
@@ -315,6 +391,8 @@ class GRPOAutoVLA(pl.LightningModule):
                 f"text_hash={item['completion_text_hash']} ids_hash={item['completion_ids_hash']} "
                 f"action_hash={item['action_tokens_hash']} traj_hash={item['trajectory_hash']} "
                 f"action_candidates={item['action_candidate_count']} action_len={item['action_tokens_len']} "
+                f"answer_action_len={item['answer_action_tokens_len']} "
+                f"answer_valid={item['answer_block_valid']} invalid_reason={item['reward_invalid_reason']} "
                 f"action_nonzero={item['action_nonzero_count']} "
                 f"preview={preview!r}"
             )
@@ -324,6 +402,13 @@ class GRPOAutoVLA(pl.LightningModule):
         action_len = float(sample.get("action_tokens_len", 0))
         action_nonzero = float(sample.get("action_nonzero_count", 0))
         has_action = 1.0 if action_len > 0 else 0.0
+        has_answer_block = 1.0 if float(sample.get("answer_block_count", 0)) > 0 else 0.0
+        multiple_answer_blocks = 1.0 if float(sample.get("answer_block_count", 0)) > 1 else 0.0
+        answer_block_at_tail = float(sample.get("answer_block_at_tail", 0.0))
+        answer_action_len = float(sample.get("answer_action_tokens_len", 0))
+        answer_block_valid = float(sample.get("answer_block_valid", 0.0))
+        reward_input_valid = float(sample.get("reward_input_valid", 1.0))
+        reward_invalid_reason = float(self._invalid_reason_code(sample.get("reward_invalid_reason", "")))
         completion_ids = sample.get("completion_ids")
         if isinstance(completion_ids, torch.Tensor) and completion_ids.ndim >= 2:
             completion_len = float(completion_ids.shape[1])
@@ -335,11 +420,25 @@ class GRPOAutoVLA(pl.LightningModule):
         self.log("sample_action_tokens_len", torch.tensor(action_len, device=device), sync_dist=True, prog_bar=("sample_action_tokens_len" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
         self.log("sample_action_nonzero_count", torch.tensor(action_nonzero, device=device), sync_dist=True, on_step=True, on_epoch=False)
         self.log("sample_has_action", torch.tensor(has_action, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_has_answer_block", torch.tensor(has_answer_block, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_multiple_answer_blocks", torch.tensor(multiple_answer_blocks, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_answer_block_at_tail", torch.tensor(answer_block_at_tail, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("sample_answer_action_tokens_len", torch.tensor(answer_action_len, device=device), sync_dist=True, prog_bar=("sample_answer_action_tokens_len" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+        self.log("sample_answer_block_valid", torch.tensor(answer_block_valid, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("reward_input_valid", torch.tensor(reward_input_valid, device=device), sync_dist=True, on_step=True, on_epoch=False)
+        self.log("reward_invalid_reason", torch.tensor(reward_invalid_reason, device=device), sync_dist=True, on_step=True, on_epoch=False)
         self.log("sample_completion_len", torch.tensor(completion_len, device=device), sync_dist=True, on_step=True, on_epoch=False)
         self.log("sample_prompt_len", torch.tensor(prompt_len, device=device), sync_dist=True, on_step=True, on_epoch=False)
     
     def reward_function(self, sample):
         device = next(self.parameters()).device
+
+        if not bool(sample.get("reward_input_valid", True)):
+            reward = torch.tensor(0.0, device=device)
+            cot_penalties = torch.tensor(0.0, device=device, dtype=reward.dtype)
+            self.log("train_reward", reward, sync_dist=True, prog_bar=("train_reward" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            self.log("cot_penalty", cot_penalties, sync_dist=True, prog_bar=("cot_penalty" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
+            return reward
 
         # Add pdm score for nuplan scenario
         reward = self.train_critic.rl_pdm_score(sample['trajectory'], sample['token'])
@@ -418,6 +517,7 @@ class GRPOAutoVLA(pl.LightningModule):
         # Get the model inputs
         inputs = model.get_prompt(data['input_features'])
         model_inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+        model_inputs = model._align_model_inputs(model_inputs)
 
         # Generate completion
         with torch.no_grad():
@@ -428,37 +528,53 @@ class GRPOAutoVLA(pl.LightningModule):
                 "top_p": self._sample_generation_temperature['top_p'],
             }
             self._seed_sampling_rng()
-            if 'max_new_tokens' in self._sample_generation_temperature:
-                gen_kwargs["max_new_tokens"] = self._sample_generation_temperature['max_new_tokens']
-            else:
-                gen_kwargs["max_length"] = self._sample_generation_temperature['max_length']
+            gen_kwargs.update(
+                resolve_generate_length_kwargs(
+                    model.vlm,
+                    configured_max_new_tokens=self._sample_generation_temperature.get('max_new_tokens'),
+                    configured_max_length=self._sample_generation_temperature.get('max_length'),
+                )
+            )
 
+            generate_inputs = filter_generate_inputs_for_model(model.vlm, model_inputs)
             prompt_completion_ids = model.vlm.generate(
-                **model_inputs,
+                **generate_inputs,
                 **gen_kwargs,
             )
 
-            prompt_length = inputs.input_ids.size(1)
+            prompt_length = get_input_ids_tensor(inputs).size(1)
             prompt_mask = model_inputs['attention_mask']
             completion_ids = prompt_completion_ids[:, prompt_length:]
 
             # Extract action tokens and trajectory (! batch size = 1)
             raw_action_candidates = completion_ids[0][completion_ids[0] >= self.action_start_id]
             raw_action_candidate_count = int(raw_action_candidates.numel())
-            actions_tokens = self._extract_action_tokens_from_completion(completion_ids[0], model.processor.tokenizer)
-            raw_action_len = int(actions_tokens.numel())
+            global_action_tokens = self._extract_action_tokens_from_completion(completion_ids[0], model.processor.tokenizer)
+            raw_action_len = int(global_action_tokens.numel())
 
-            if len(actions_tokens) > self.trajectory_sampling.num_poses:
-                actions_tokens = actions_tokens[:self.trajectory_sampling.num_poses]
-            elif len(actions_tokens) < self.trajectory_sampling.num_poses:
-                actions_tokens = torch.cat([actions_tokens, torch.zeros(self.trajectory_sampling.num_poses - len(actions_tokens)).to(device)])
-                actions_tokens = actions_tokens.long()
+            if self._action_answer_protocol_enabled:
+                parse_result = self._parse_action_answer_completion(completion_ids[0], model.processor.tokenizer)
+                if parse_result.is_valid:
+                    actions_tokens = self._action_tokens_tensor(parse_result.action_token_ids, device=device)
+                else:
+                    actions_tokens = self._zero_padded_action_tokens(device=device)
+                answer_block_count = int(parse_result.answer_block_count)
+                answer_block_at_tail = 1.0 if parse_result.answer_block_at_tail else 0.0
+                answer_action_tokens_len = int(parse_result.action_token_count)
+                answer_block_valid = 1.0 if parse_result.is_valid else 0.0
+                reward_input_valid = 1.0 if parse_result.is_valid else 0.0
+                reward_invalid_reason = parse_result.invalid_reason
             else:
-                pass
+                actions_tokens = self._normalize_action_tokens_default(global_action_tokens, device=device)
+                answer_block_count = 0
+                answer_block_at_tail = 0.0
+                answer_action_tokens_len = 0
+                answer_block_valid = 0.0
+                reward_input_valid = 1.0
+                reward_invalid_reason = ""
 
-            decoded_traj = self.autovla.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens.cpu())[0, 1:]
-            decoded_traj_np = decoded_traj.cpu().numpy()
-            trajectory = Trajectory(decoded_traj_np, self.trajectory_sampling)
+            trajectory = self._trajectory_from_action_tokens(actions_tokens)
+            decoded_traj_np = trajectory.poses
 
             # Create completion mask
             is_eos = completion_ids == model.processor.tokenizer.eos_token_id
@@ -496,6 +612,12 @@ class GRPOAutoVLA(pl.LightningModule):
                        'action_tokens_hash': action_tokens_hash,
                        'action_candidate_count': raw_action_candidate_count,
                        'action_tokens_len': raw_action_len,
+                       'answer_block_count': answer_block_count,
+                       'answer_block_at_tail': answer_block_at_tail,
+                       'answer_action_tokens_len': answer_action_tokens_len,
+                       'answer_block_valid': answer_block_valid,
+                       'reward_input_valid': reward_input_valid,
+                       'reward_invalid_reason': reward_invalid_reason,
                        'action_nonzero_count': action_nonzero_count,
                        'trajectory_hash': trajectory_hash,
                        'sampling_seed': self._last_sampling_seed,
@@ -508,11 +630,11 @@ class GRPOAutoVLA(pl.LightningModule):
     
     def configure_optimizers(self):
         if not self._train_vision_backbone:
-            for param in self.autovla.vlm.visual.parameters():
+            for param in get_vision_backbone(self.autovla.vlm).parameters():
                 param.requires_grad = False
 
         if not self._train_llm_backbone:
-            for param in self.autovla.vlm.model.parameters():
+            for param in get_language_backbone(self.autovla.vlm).parameters():
                 param.requires_grad = False
 
         params_to_update = []
@@ -650,6 +772,8 @@ class SFTAutoVLA(pl.LightningModule):
         try:
             vlm.eval()
             with torch.no_grad():
+                generate_inputs = self.autovla._align_model_inputs(generate_inputs)
+                generate_inputs = filter_generate_inputs_for_model(vlm, generate_inputs)
                 prompt_completion_ids = vlm.generate(**generate_inputs, **gen_kwargs)
             completion_ids = prompt_completion_ids[:, prompt_len:][0]
             action_candidates = int((completion_ids >= self.autovla.action_start_id).sum().item())
@@ -752,11 +876,11 @@ class SFTAutoVLA(pl.LightningModule):
     
     def configure_optimizers(self):
         if not self._train_vision_backbone:
-            for param in self.autovla.vlm.visual.parameters():
+            for param in get_vision_backbone(self.autovla.vlm).parameters():
                 param.requires_grad = False
 
         if not self._train_llm_backbone:
-            for param in self.autovla.vlm.model.parameters():
+            for param in get_language_backbone(self.autovla.vlm).parameters():
                 param.requires_grad = False
 
         params_to_update = []
@@ -847,27 +971,122 @@ class AutoVLA(torch.nn.Module):
         self.device = device
 
         model_path = config['model']['pretrained_model_path']
-        self.vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map=device
-        )
-        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.model_family = detect_model_family(model_path)
+        self.vlm = load_causal_lm_for_model(model_path, device=device)
+        self.processor = load_processor_for_model(model_path)
         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer, 
                                                 model_config=config['model'])
-        self.vlm.resize_token_embeddings(len(self.processor.tokenizer))
+        resize_token_embeddings_for_model(self.vlm, len(self.processor.tokenizer))
+        initialize_model_runtime_state(self.vlm, self.processor)
 
         self.video_conf = config['model']['video']
         self.action_start_id = config['model']['tokens']['action_start_id']
         self._trajectory_num_poses = int(config['model']['trajectory']['num_poses'])
+        self._action_answer_protocol_enabled = bool(
+            config.get('model', {}).get('action_answer_protocol', {}).get('enabled', False)
+        )
 
         self.use_cot = config['model']['use_cot']
         self.gen_conf = config['inference']['sample']
         self._inference_max_length = config.get('inference', {}).get('max_length', self.gen_conf.get('max_length'))
+        self._last_protocol_result = {
+            "protocol_valid": 0,
+            "invalid_reason": "not_run",
+            "answer_block_count": 0,
+            "answer_block_at_tail": 0,
+            "answer_action_tokens_len": 0,
+        }
+
+    def _vision_dtype(self) -> torch.dtype:
+        vision_backbone = get_vision_backbone(self.vlm)
+        first_param = next(vision_backbone.parameters(), None)
+        if first_param is None:
+            return torch.float32
+        return first_param.dtype
+
+    def _align_model_inputs(self, model_inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return align_vision_tensor_dtypes(model_inputs, self._vision_dtype())
+
+    def _build_qwen_inputs(self, messages):
+        image_inputs, video_inputs = process_vision_info(messages)
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
+        )
+        return self.processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+
+    def _build_internvl_inputs(self, messages):
+        image_paths = []
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            for item in message.get("content", []):
+                if item.get("type") == "video":
+                    image_paths.extend(item.get("video", []))
+                elif item.get("type") == "image":
+                    image_paths.append(item.get("image"))
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        return self.processor.build_batch(
+            text=[text],
+            image_paths=[image_paths],
+            padding=True,
+            return_tensors="pt",
+        )
+
+    def _parse_action_answer_completion(self, completion_ids: torch.Tensor):
+        return parse_action_answer_completion(
+            completion_ids.detach().cpu(),
+            tokenizer=self.processor.tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=self._trajectory_num_poses,
+        )
+
+    def _set_last_protocol_result(self, parse_result=None) -> None:
+        if parse_result is None:
+            self._last_protocol_result = {
+                "protocol_valid": 0,
+                "invalid_reason": "not_run",
+                "answer_block_count": 0,
+                "answer_block_at_tail": 0,
+                "answer_action_tokens_len": 0,
+            }
+            return
+        self._last_protocol_result = {
+            "protocol_valid": int(parse_result.is_valid),
+            "invalid_reason": parse_result.invalid_reason,
+            "answer_block_count": int(parse_result.answer_block_count),
+            "answer_block_at_tail": int(parse_result.answer_block_at_tail),
+            "answer_action_tokens_len": int(parse_result.action_token_count),
+        }
+
+    def _decode_protocol_trajectory(self, action_token_ids: List[int]) -> torch.Tensor:
+        if not action_token_ids:
+            return torch.zeros((0, 3), dtype=torch.float32)
+        token_tensor = torch.tensor(action_token_ids, dtype=torch.long)
+        decoded = self.action_tokenizer.decode_token_ids_to_trajectory(token_tensor)
+        if isinstance(decoded, torch.Tensor) and decoded.ndim == 3 and decoded.shape[2] == 3 and decoded.shape[0] > 0:
+            return decoded[0, 1:]
+        return torch.zeros((0, 3), dtype=torch.float32)
+
+    def _normalize_predicted_trajectory(self, trajectory: torch.Tensor) -> torch.Tensor:
+        if trajectory.shape[0] == 0:
+            return torch.zeros((self._trajectory_num_poses, 3), dtype=torch.float32)
+        if trajectory.shape[0] < self._trajectory_num_poses:
+            pad = trajectory[-1:].repeat(self._trajectory_num_poses - trajectory.shape[0], 1)
+            return torch.cat([trajectory, pad], dim=0)
+        return trajectory[: self._trajectory_num_poses]
 
     def predict(self, input_features):
         inputs = self.get_prompt(input_features)
         model_inputs = {k: v.to(self.device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+        model_inputs = self._align_model_inputs(model_inputs)
 
         gen_kwargs = {
             "do_sample": True,
@@ -875,38 +1094,40 @@ class AutoVLA(torch.nn.Module):
             "top_k": self.gen_conf['top_k'],
             "top_p": self.gen_conf['top_p'],
         }
-        if self.gen_conf.get('max_new_tokens') is not None:
-            gen_kwargs["max_new_tokens"] = int(self.gen_conf['max_new_tokens'])
-        else:
-            gen_kwargs["max_length"] = self._inference_max_length
+        gen_kwargs.update(
+            resolve_generate_length_kwargs(
+                self.vlm,
+                configured_max_new_tokens=self.gen_conf.get('max_new_tokens'),
+                configured_max_length=self._inference_max_length,
+            )
+        )
 
-        outputs = self.vlm.generate(**model_inputs, **gen_kwargs)
+        generate_inputs = filter_generate_inputs_for_model(self.vlm, model_inputs)
+        outputs = self.vlm.generate(**generate_inputs, **gen_kwargs)
 
+        input_ids = get_input_ids_tensor(inputs)
         outputs_trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, outputs)
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, outputs)
         ]
 
-        outputs_trimmed = outputs_trimmed[0][:-1].cpu() # remove end token
+        outputs_trimmed = outputs_trimmed[0].cpu()
         cot_results = self.processor.decode(outputs_trimmed)
-        # if 'Chain-of-Thought is not needed' not in self.processor.decode(outputs_trimmed):
-        #     print(self.processor.decode(outputs_trimmed))
-        #     print("has cot")
-        # else:
-        #     print(self.processor.decode(outputs_trimmed))
-        #     print("no cot")
-        actions_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
-        decoded = self.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens)
-        if isinstance(decoded, torch.Tensor) and decoded.ndim == 3 and decoded.shape[2] == 3 and decoded.shape[0] > 0:
-            trajectory = decoded[0, 1:]
+        if self._action_answer_protocol_enabled:
+            parse_result = self._parse_action_answer_completion(outputs_trimmed)
+            self._set_last_protocol_result(parse_result)
+            if parse_result.is_valid:
+                trajectory = self._decode_protocol_trajectory(parse_result.action_token_ids)
+            else:
+                trajectory = torch.zeros((0, 3), dtype=torch.float32)
         else:
-            trajectory = torch.zeros((0, 3), dtype=torch.float32)
-        if trajectory.shape[0] == 0:
-            trajectory = torch.zeros((self._trajectory_num_poses, 3), dtype=torch.float32)
-        elif trajectory.shape[0] < self._trajectory_num_poses:
-            pad = trajectory[-1:].repeat(self._trajectory_num_poses - trajectory.shape[0], 1)
-            trajectory = torch.cat([trajectory, pad], dim=0)
-        else:
-            trajectory = trajectory[: self._trajectory_num_poses]
+            self._set_last_protocol_result(None)
+            actions_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
+            decoded = self.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens)
+            if isinstance(decoded, torch.Tensor) and decoded.ndim == 3 and decoded.shape[2] == 3 and decoded.shape[0] > 0:
+                trajectory = decoded[0, 1:]
+            else:
+                trajectory = torch.zeros((0, 3), dtype=torch.float32)
+        trajectory = self._normalize_predicted_trajectory(trajectory)
 
         return trajectory, cot_results
     
@@ -1008,7 +1229,7 @@ class AutoVLA(torch.nn.Module):
                 "type": "text",
                 "text": (
                     f"The current velocity of the vehicle is {velocity:.3f} m/s, and the current acceleration is {acceleration:.3f} m/s². "
-                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next five seconds."
+                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next four seconds."
                 )
             },
         ]
@@ -1023,7 +1244,7 @@ class AutoVLA(torch.nn.Module):
                             "text":
                             "You are an Advanced Driver Assistance and Full Self-Driving System. "
                             "You will receive visual observations from the ego vehicle’s cameras and dynamic information about the vehicle’s current state. "
-                            "Your task is to predict the optimal driving action for the next five seconds.\n\n"
+                            "Your task is to predict the optimal driving action for the next four seconds.\n\n"
                             "First, carefully analyze the surrounding environment by considering traffic lights, the movements of other vehicles and pedestrians, lane markings, and any other relevant factors.\n\n"
                             "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving action. Otherwise, you may directly predict the final driving action.\n\n"
                             "Structure your reasoning as follows:\n"
@@ -1056,7 +1277,7 @@ class AutoVLA(torch.nn.Module):
                             "text":
                             "You are an Advanced Driver Assistance and Full Self-Driving System. "
                             "You will be provided with video observations from the ego vehicle’s surrounding cameras, along with the vehicle’s current dynamic states. "
-                            "Your task is to predict the most appropriate driving action for the next five seconds."
+                            "Your task is to predict the most appropriate driving action for the next four seconds."
                         }
                     ]
                 },
@@ -1066,26 +1287,16 @@ class AutoVLA(torch.nn.Module):
                 },
             ]
 
-        image_inputs, video_inputs = process_vision_info(messages)
-        
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
-        )
-
-        inputs = self.processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
-        )
-
-        return inputs
+        if self.model_family == "internvl_chat":
+            return self._build_internvl_inputs(messages)
+        return self._build_qwen_inputs(messages)
     
     def forward(self, inputs):
+        inputs = dict(inputs)
         inputs.pop('gt_trajectory')
         inputs.pop('gt_action')
         inputs.pop('has_cot')
+        inputs = self._align_model_inputs(inputs)
         outputs: CausalLMOutputWithPast = self.vlm(**inputs)
 
         return outputs

@@ -41,9 +41,10 @@ from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 
 from models.autovla import GRPOAutoVLA
+from models.utils.model_backends import detect_model_family
+from models.utils.model_backends import resolve_transformer_layer_classes
 from models.utils.trainer_progress import build_tqdm_progress_bar
 from dataset_utils.rft_dataset import RFTDataset
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLDecoderLayer
 import datetime
 import time
 import warnings
@@ -210,9 +211,11 @@ if __name__ == "__main__":
     # Training
     wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls={
-            Qwen2_5_VLDecoderLayer
-        },
+        transformer_layer_cls=set(
+            resolve_transformer_layer_classes(
+                detect_model_family(config['model']['pretrained_model_path'])
+            )
+        ),
     )
 
     run_id = _resolve_run_id(config)

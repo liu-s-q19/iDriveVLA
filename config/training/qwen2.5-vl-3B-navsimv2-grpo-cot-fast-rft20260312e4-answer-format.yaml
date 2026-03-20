@@ -1,5 +1,5 @@
-name: qwen2.5-vl-3B-navsimv2-grpo-fast-rft20260312e4
-description: AutoVLA GRPO fast profile on NavSim v2 from SFT 2026-03-12 epoch4 ckpt
+name: qwen2.5-vl-3B-navsimv2-grpo-fast-rft20260312e4-answer-format
+description: AutoVLA GRPO fast profile on NavSim v2 canonical 8-pose answer-format protocol
 
 model:
   use_cot: false
@@ -7,8 +7,8 @@ model:
   prompt:
     force_action_answer_prefix: false
   action_answer_protocol:
-    enabled: false
-  sft_model_path: /data/liushiqi/AutoVLA/runs/sft/2026-03-12_06-03-13/epoch=4-loss=0.9352.ckpt
+    enabled: true
+  sft_model_path: /data/liushiqi/AutoVLA/runs/sft/navsimv2_sft8_local_8gpu_retry3_2026-03-18_09-14-56/epoch=4-loss=0.8492.ckpt
   codebook_cache_path: "codebook_cache/agent_vocab.pkl"
   train_vision_backbone: false
   train_lm_backbone: true
@@ -93,7 +93,7 @@ rl:
       map_root_override: null
   advantage:
     group_std_eps: 1e-6
-    fallback_mode: reward
+    fallback_mode: zero
   cot_penalty:
     coef: 0.002
     center: 400.0
