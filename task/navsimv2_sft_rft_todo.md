@@ -1018,6 +1018,60 @@ bash scripts/eval/run_navhard_two_stage_autovla_8gpu.sh \
 '
 ```
 
+### RFT step6000 对比 SFT 最终结果（2026-03-17 补录）
+- 对比对象：
+  - SFT ckpt：
+    - `/data/liushiqi/AutoVLA/runs/sft/2026-03-12_06-03-13/epoch=4-loss=0.9352.ckpt`
+  - RFT ckpt：
+    - `/data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft20260312e4_ip190_2026-03-16_13-23-06/ckpt/rft-step6000-reward6.2188.ckpt`
+- `navtest` 标准口径 EPDMS：
+  - SFT：
+    - 输出目录：
+      - `/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_sft_20260312_epoch4_conservative/navtest_full_2026-03-15_04-48-25_190`
+    - 结果：
+      - `successful=12146`
+      - `failed=0`
+      - `invalid_sum=0`
+      - `score_mean=0.5944498471141966`
+  - RFT：
+    - 输出目录：
+      - `/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft20260312_step6000/navtest_full_2026-03-17_02-42-36_190_tmux8`
+    - 汇总口径：
+      - 该目录是 `8` 个 shard `summary.json`，当前无单独 merged summary。
+      - 按各 shard `successful` 加权汇总：
+        - `successful=12146`
+        - `failed=0`
+        - `invalid_sum=0`
+        - `score_mean=0.6170142697125328`
+  - 对比结论：
+    - 绝对提升：`+0.022564422598336242`
+    - 相对提升：`+3.7958496764490812%`
+- `navhard two-stage`：
+  - SFT：
+    - 输出目录：
+      - `/data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_remote33_2026-03-15_06-07-47`
+    - 配置确认：
+      - `resolved_config.yaml` 中 `model.checkpoint_path=/data/liushiqi/AutoVLA/runs/sft/2026-03-12_06-03-13/epoch=4-loss=0.9352.ckpt`
+    - 结果：
+      - `num_successful_scenarios=5912`
+      - `num_failed_scenarios=0`
+      - `final_extended_pdm_score=0.14937031924317998`
+  - RFT：
+    - 输出目录：
+      - `/data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_rft20260312_step6000/plan_2026-03-17_02-37-14_190`
+    - 结果：
+      - `num_successful_scenarios=5912`
+      - `num_failed_scenarios=0`
+      - `final_extended_pdm_score=0.29853212542780166`
+  - 对比结论：
+    - 绝对提升：`+0.1491618061846217`
+    - 相对提升：`+99.8604052936254%`
+- 总结结论：
+  - 以当前这组验收结果看，`RFT step6000` 相比 `SFT epoch4` 在 `navtest` 和 `navhard two-stage` 两个口径上都取得了明确提升。
+  - `navtest` 提升幅度中等，说明标准口径单阶段能力有稳定增益。
+  - `navhard two-stage` 提升幅度显著，说明引入 RL 后，对更困难场景的规划质量改善更明显。
+  - 当前可以把这版 `RFT step6000` 视为优于当前 `SFT epoch4` 的验收通过候选。
+
 ### NavSim v2 RL 统一采样口径后重启记录（2026-03-16）
 - 目的：
   - 使当前 NavSim v2 RL run 与新统一口径一致：
