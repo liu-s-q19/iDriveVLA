@@ -326,6 +326,8 @@ def _run_one_stage_fallback(hydra_cfg: Any) -> int:
 
 
 def _append_average_row(pdm_score_df: pd.DataFrame) -> pd.DataFrame:
+    if pdm_score_df.empty:
+        return pdm_score_df
     average_row: Dict[str, Any] = {col: None for col in pdm_score_df.columns}
     for col in pdm_score_df.columns:
         if col in {"token", "valid", "weighted_metrics", "weighted_metrics_array", "ego_simulated_states"}:
@@ -336,6 +338,38 @@ def _append_average_row(pdm_score_df: pd.DataFrame) -> pd.DataFrame:
     average_row["valid"] = bool(pdm_score_df["valid"].all())
     pdm_score_df.loc[len(pdm_score_df)] = average_row
     return pdm_score_df
+
+
+def _write_autovla_one_stage_outputs(output_dir: Path, pdm_score_df: pd.DataFrame, *, successful: int, failed: int, invalid_sum: int, score_mean: float) -> int:
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = None
+    if not pdm_score_df.empty:
+        timestamp = datetime.utcnow().strftime("%Y.%m.%d.%H.%M.%S")
+        csv_path = output_dir / f"{timestamp}.csv"
+        pdm_score_df.to_csv(csv_path, index=False)
+
+    summary = {
+        "successful": int(successful),
+        "failed": int(failed),
+        "invalid_sum": int(invalid_sum),
+        "score_mean": float(score_mean),
+        "csv_path": str(csv_path) if csv_path is not None else None,
+    }
+    summary_path = output_dir / "summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    LOGGER.info(
+        "Finished AutoVLA one-stage evaluation. successful=%d failed=%d invalid_sum=%d score_mean=%s csv=%s",
+        successful,
+        failed,
+        invalid_sum,
+        score_mean,
+        csv_path if csv_path is not None else "N/A",
+    )
+    return 0
 
 
 def _evaluate_autovla_one_stage_tokens(
@@ -462,6 +496,16 @@ def _run_autovla_one_stage_from_components(
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if not tokens:
+        return _write_autovla_one_stage_outputs(
+            output_dir,
+            pd.DataFrame(),
+            successful=0,
+            failed=0,
+            invalid_sum=0,
+            score_mean=0.0,
+        )
+
     pdm_score_df = _evaluate_autovla_one_stage_tokens(
         tokens=tokens,
         scene_loader=scene_loader,
@@ -490,31 +534,14 @@ def _run_autovla_one_stage_from_components(
     if "invalid" in scenario_df.columns:
         invalid_sum = int(pd.to_numeric(scenario_df["invalid"], errors="coerce").fillna(0).sum())
     score_mean = float(scenario_df["score"].mean(skipna=True)) if "score" in scenario_df.columns else float("nan")
-
-    timestamp = datetime.utcnow().strftime("%Y.%m.%d.%H.%M.%S")
-    csv_path = output_dir / f"{timestamp}.csv"
-    pdm_score_df.to_csv(csv_path, index=False)
-
-    summary = {
-        "successful": successful,
-        "failed": failed,
-        "invalid_sum": invalid_sum,
-        "score_mean": score_mean,
-        "csv_path": str(csv_path),
-    }
-    summary_path = output_dir / "summary.json"
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    LOGGER.info(
-        "Finished AutoVLA one-stage evaluation. successful=%d failed=%d invalid_sum=%d score_mean=%s csv=%s",
-        successful,
-        failed,
-        invalid_sum,
-        score_mean,
-        csv_path,
+    return _write_autovla_one_stage_outputs(
+        output_dir,
+        pdm_score_df,
+        successful=successful,
+        failed=failed,
+        invalid_sum=invalid_sum,
+        score_mean=score_mean,
     )
-    return 0
 
 
 def _run_autovla_one_stage(
@@ -588,6 +615,17 @@ def _run_autovla_one_stage(
     if dry_run:
         LOGGER.info("Dry-run enabled for AutoVLA one-stage mode. Skip model loading and scoring.")
         return 0
+
+    if not tokens_to_evaluate:
+        LOGGER.info("No tokens to evaluate for output_dir=%s. Skip model loading and write empty summary.", hydra_cfg.output_dir)
+        return _write_autovla_one_stage_outputs(
+            Path(str(hydra_cfg.output_dir)),
+            pd.DataFrame(),
+            successful=0,
+            failed=0,
+            invalid_sum=0,
+            score_mean=0.0,
+        )
 
     model_cfg = OmegaConf.create(cfg["model"])
     predictor = AutoVLAPredictor(model_cfg, model_cfg.trajectory_sampling)

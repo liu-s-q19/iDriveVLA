@@ -184,6 +184,47 @@ def test_run_autovla_one_stage_from_components_writes_outputs(tmp_path):
     assert int(summary["invalid_sum"]) == 0
 
 
+def test_run_autovla_one_stage_from_components_handles_empty_tokens(tmp_path):
+    class _Predictor:
+        def predict(self, payload):
+            raise AssertionError("predict should not be called for empty token lists")
+
+    run_dir = tmp_path / "empty-run"
+    code = mod._run_autovla_one_stage_from_components(
+        tokens=[],
+        output_dir=run_dir,
+        scene_loader=_FakeSceneLoader(),
+        metric_cache_loader=_FakeMetricCacheLoader(),
+        predictor=_Predictor(),
+        pdm_score_fn=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pdm_score_fn should not run")),
+        simulator=SimpleNamespace(proposal_sampling="proposal_sampling"),
+        scorer=object(),
+        traffic_agents_policy=object(),
+        sensor_root=Path("/tmp/sensors"),
+        dataset_name="navsim",
+        trajectory_num_poses=2,
+        trajectory_interval=0.5,
+        trajectory_cls=_FakeTrajectory,
+        payload_builder=lambda **kwargs: (_ for _ in ()).throw(AssertionError("payload_builder should not run")),
+    )
+
+    assert code == 0
+    assert sorted(run_dir.glob("*.csv")) == []
+
+    summary = pd.read_json(run_dir / "summary.json", typ="series")
+    assert int(summary["successful"]) == 0
+    assert int(summary["failed"]) == 0
+    assert int(summary["invalid_sum"]) == 0
+    assert float(summary["score_mean"]) == 0.0
+
+
+def test_append_average_row_handles_empty_dataframe():
+    df = mod._append_average_row(pd.DataFrame())
+
+    assert df.empty
+    assert list(df.columns) == []
+
+
 def test_evaluate_autovla_one_stage_tokens_accepts_tuple_pdm_score():
     def payload_builder(token, scene, sensor_root, dataset_name, trajectory_num_poses):
         return {
