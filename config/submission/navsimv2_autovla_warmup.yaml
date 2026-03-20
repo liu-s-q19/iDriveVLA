@@ -1,0 +1,54 @@
+upstream:
+  navsim_root: /data/liushiqi/navsim
+  config_dir: /data/liushiqi/navsim/navsim/planning/script/config/pdm_scoring
+  submission_config_name: default_run_create_submission_pickle
+  validation_config_name: default_run_pdm_score_from_submission
+  overrides: []
+
+data:
+  train_test_split: warmup_two_stage
+  navsim_log_path: /readOnly/df_l2.9/navsim/test_navsim_logs/test
+  original_sensor_path: /readOnly/df_l2.9/navsim/test_sensor_blobs/test
+  synthetic_sensor_path: /readOnly/df_l2.9/navsim/warmup_two_stage/sensor_blobs
+  synthetic_scenes_path: /readOnly/df_l2.9/navsim/warmup_two_stage/synthetic_scene_pickles
+  metric_cache_path: /data/dataset/navsim/metric_cache_v2/warmup_two_stage_MUST_SET
+
+model:
+  config_path: /data/liushiqi/AutoVLA/config/eval/qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative-model.yaml
+  checkpoint_path: null
+  sensor_data_path: /
+  dataset_name: navsim
+  device: cuda
+  trajectory_sampling:
+    num_poses: 8
+    interval_length: 0.5
+  lora_conf:
+    use_lora: null
+    task_type: CAUSAL_LM
+    target_modules: [q_proj, v_proj, k_proj, o_proj]
+    r: 8
+    lora_alpha: 8
+    lora_dropout: 0.1
+    bias: none
+
+submission:
+  team_name: liusq19
+  authors: liushiqi
+  email: liusq19@qq.com
+  institution: tsinghua
+  country: CHINA
+
+run:
+  output_dir: /data/liushiqi/AutoVLA/logs/submission/navsimv2_autovla_warmup
+  log_path: /data/liushiqi/AutoVLA/logs/submission/navsimv2_autovla_warmup/run_navsimv2_autovla_submission.log
+  max_scenes: null
+  env_vars:
+    NUPLAN_MAPS_ROOT: /data/dataset/navsim/maps
+    OPENSCENE_DATA_ROOT: /data/dataset/navsim
+    NUPLAN_MAP_VERSION: nuplan-maps-v1.0
+    NAVSIM_DEVKIT_ROOT: /data/liushiqi/navsim
+
+validation:
+  mode: warmup_local_score
+  output_dir: /data/liushiqi/AutoVLA/logs/submission_validation/navsimv2_autovla_warmup
+  require_submission_filename: true
