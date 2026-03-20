@@ -27,6 +27,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 
 from models.autovla import AutoVLA
 from tools.eval.navhard_two_stage_sharded import (
+    PREDICTION_DIAGNOSTIC_COLUMNS,
     collect_all_mappings,
     filter_mappings_by_available_tokens,
     finalize_merged_results,
@@ -58,6 +59,74 @@ def _ensure_upstream_navsim(navsim_root: str) -> None:
 
 def _safe_token_list(tokens: Optional[List[str]]) -> List[str]:
     return [] if tokens is None else list(tokens)
+
+
+def _checkpoint_uses_lora(state_dict: Dict[str, Any]) -> bool:
+    for key in state_dict.keys():
+        if ".lora_A." in key or ".lora_B." in key or ".base_model.model." in key:
+            return True
+    return False
+
+
+def _maybe_wrap_with_lora(model: AutoVLA, lora_conf: Optional[DictConfig], checkpoint_uses_lora: bool) -> bool:
+    if not lora_conf:
+        return False
+
+    use_lora = lora_conf.get("use_lora")
+    if use_lora is None:
+        use_lora = checkpoint_uses_lora
+        if use_lora:
+            LOGGER.warning(
+                "Detected LoRA-form checkpoint while model.lora_conf.use_lora is unset; enabling LoRA wrapper automatically."
+            )
+
+    if not use_lora:
+        return False
+
+    lora_config = LoraConfig(
+        task_type=TaskType[lora_conf.get("task_type", "CAUSAL_LM")],
+        target_modules=lora_conf.get("target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]),
+        r=int(lora_conf.get("r", 8)),
+        lora_alpha=int(lora_conf.get("lora_alpha", 8)),
+        lora_dropout=float(lora_conf.get("lora_dropout", 0.1)),
+        bias=lora_conf.get("bias", "none"),
+    )
+    model.vlm = get_peft_model(model.vlm, lora_config)
+    return True
+
+
+def _summarize_checkpoint_compatibility(
+    model: AutoVLA,
+    cleaned_state_dict: Dict[str, Any],
+    load_msg: Any,
+) -> Dict[str, Any]:
+    ignored_keys = {"training_reward_buffer", "sliding_idx", "window_count"}
+    model_keys = set(model.state_dict().keys()) - ignored_keys
+    checkpoint_keys = set(cleaned_state_dict.keys()) - ignored_keys
+    exact_keys = model_keys & checkpoint_keys
+    missing_keys = [key for key in list(load_msg.missing_keys) if key not in ignored_keys]
+    unexpected_keys = [key for key in list(load_msg.unexpected_keys) if key not in ignored_keys]
+    return {
+        "matched_exact": len(exact_keys),
+        "missing_keys": missing_keys,
+        "unexpected_keys": unexpected_keys,
+    }
+
+
+def _raise_on_checkpoint_incompatibility(summary: Dict[str, Any], checkpoint_uses_lora: bool) -> None:
+    missing_keys = list(summary["missing_keys"])
+    unexpected_keys = list(summary["unexpected_keys"])
+    matched_exact = int(summary["matched_exact"])
+    if not missing_keys and not unexpected_keys and matched_exact > 0:
+        return
+
+    raise RuntimeError(
+        "Checkpoint incompatible with evaluation model: "
+        f"matched_exact={matched_exact} "
+        f"missing={len(missing_keys)} "
+        f"unexpected={len(unexpected_keys)} "
+        f"checkpoint_uses_lora={checkpoint_uses_lora}"
+    )
 
 
 def _intersect_tokens(lhs: Optional[List[str]], rhs: Optional[List[str]]) -> List[str]:
@@ -110,6 +179,31 @@ def _pad_trajectory(poses: np.ndarray, target_len: int) -> np.ndarray:
         return poses[:target_len].astype(np.float32)
     pad = np.repeat(poses[-1:, :], target_len - poses.shape[0], axis=0)
     return np.concatenate([poses, pad], axis=0).astype(np.float32)
+
+
+def _build_prediction_diagnostics(
+    protocol_result: Optional[Dict[str, Any]],
+    raw_pose_count: int,
+    target_num_poses: int,
+) -> Dict[str, Any]:
+    result = dict(protocol_result or {})
+    raw_count = max(int(raw_pose_count), 0)
+    target_len = max(int(target_num_poses), 0)
+    protocol_valid = int(result.get("protocol_valid", 0))
+    protocol_reason = str(result.get("invalid_reason", "not_run") or "")
+    action_tokens_count = int(result.get("answer_action_tokens_len", 0) or 0)
+    was_padded = int(raw_count < target_len)
+    was_truncated = int(raw_count > target_len)
+    used_zero_fallback = int(raw_count == 0 and target_len > 0)
+    return {
+        "protocol_valid": protocol_valid,
+        "protocol_reason": protocol_reason,
+        "action_tokens_count": action_tokens_count,
+        "raw_pose_count": raw_count,
+        "was_padded": was_padded,
+        "was_truncated": was_truncated,
+        "used_zero_fallback": used_zero_fallback,
+    }
 
 
 def _scene_to_autovla_payload(
@@ -177,29 +271,33 @@ class AutoVLAPredictor:
         self.num_poses = int(trajectory_sampling_cfg.num_poses)
         self.prediction_seed_mode = str(model_cfg.get("prediction_seed_mode", "token_hash")).lower()
         self.prediction_seed_base = int(model_cfg.get("prediction_seed_base", 0))
-
-        lora_conf = model_cfg.get("lora_conf")
-        if lora_conf and lora_conf.get("use_lora") is not None:
-            if lora_conf.get("use_lora"):
-                lora_config = LoraConfig(
-                    task_type=TaskType[lora_conf.get("task_type", "CAUSAL_LM")],
-                    target_modules=lora_conf.get("target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]),
-                    r=int(lora_conf.get("r", 8)),
-                    lora_alpha=int(lora_conf.get("lora_alpha", 8)),
-                    lora_dropout=float(lora_conf.get("lora_dropout", 0.1)),
-                    bias=lora_conf.get("bias", "none"),
-                )
-                self.model.vlm = get_peft_model(self.model.vlm, lora_config)
+        self.last_protocol_result: Dict[str, Any] = {}
+        self.last_prediction_diagnostics: Dict[str, Any] = _build_prediction_diagnostics({}, 0, self.num_poses)
 
         state: Dict[str, Any] = torch.load(str(model_cfg.checkpoint_path), map_location=self.model.device)
         state_dict = state.get("state_dict", state)
+        checkpoint_uses_lora = _checkpoint_uses_lora(state_dict)
+        _maybe_wrap_with_lora(self.model, model_cfg.get("lora_conf"), checkpoint_uses_lora)
         cleaned_state_dict = {}
         for key, value in state_dict.items():
             if key.startswith("autovla."):
                 cleaned_state_dict[key.replace("autovla.", "", 1)] = value
             else:
                 cleaned_state_dict[key] = value
-        self.model.load_state_dict(cleaned_state_dict, strict=False)
+        msg = self.model.load_state_dict(cleaned_state_dict, strict=False)
+        compatibility = _summarize_checkpoint_compatibility(
+            model=self.model,
+            cleaned_state_dict=cleaned_state_dict,
+            load_msg=msg,
+        )
+        LOGGER.info(
+            "Checkpoint compatibility summary: matched_exact=%d missing=%d unexpected=%d checkpoint_uses_lora=%s",
+            compatibility["matched_exact"],
+            len(compatibility["missing_keys"]),
+            len(compatibility["unexpected_keys"]),
+            checkpoint_uses_lora,
+        )
+        _raise_on_checkpoint_incompatibility(compatibility, checkpoint_uses_lora)
         self.model.eval()
 
     def predict(self, payload: Dict[str, Any]) -> Tuple[Any, str]:
@@ -233,10 +331,16 @@ class AutoVLAPredictor:
         }
         with torch.no_grad():
             traj_tensor, cot = self.model.predict(features)
+        self.last_protocol_result = dict(getattr(self.model, "_last_protocol_result", {}))
 
         traj_np = traj_tensor.detach().cpu().numpy().astype(np.float32)
         if traj_np.ndim != 2 or traj_np.shape[1] != 3:
             raise ValueError(f"invalid trajectory shape from model: {traj_np.shape}")
+        self.last_prediction_diagnostics = _build_prediction_diagnostics(
+            self.last_protocol_result,
+            raw_pose_count=int(traj_np.shape[0]),
+            target_num_poses=self.num_poses,
+        )
         traj_np = _pad_trajectory(traj_np, self.num_poses)
 
         sampling = TrajectorySampling(num_poses=self.num_poses, interval_length=self.interval_length)
@@ -374,6 +478,11 @@ def _evaluate_token(
     debug_counter: List[int],
 ) -> pd.DataFrame:
     metric_cache = None
+    diagnostics = _build_prediction_diagnostics(
+        getattr(predictor, "last_protocol_result", {}),
+        raw_pose_count=0,
+        target_num_poses=trajectory_num_poses,
+    )
     try:
         metric_cache = metric_cache_loader.get_from_token(token)
         scene = scene_loader.get_scene_from_token(token)
@@ -391,6 +500,7 @@ def _evaluate_token(
             debug_counter[0] += 1
 
         traj_np, traj_sampling, _cot = predictor.predict(payload)
+        diagnostics = dict(getattr(predictor, "last_prediction_diagnostics", diagnostics))
         trajectory = trajectory_cls(poses=traj_np, trajectory_sampling=traj_sampling)
 
         try:
@@ -500,6 +610,9 @@ def _evaluate_token(
             score_row["frame_type"] = np.nan
 
     score_row["token"] = token
+    for key in PREDICTION_DIAGNOSTIC_COLUMNS:
+        if key in diagnostics:
+            score_row[key] = diagnostics[key]
     return score_row
 
 

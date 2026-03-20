@@ -12,6 +12,15 @@ import pandas as pd
 
 
 NavhardJob = Dict[str, str]
+PREDICTION_DIAGNOSTIC_COLUMNS = [
+    "protocol_valid",
+    "protocol_reason",
+    "action_tokens_count",
+    "raw_pose_count",
+    "was_padded",
+    "was_truncated",
+    "used_zero_fallback",
+]
 
 
 def safe_token_list(tokens: Optional[Sequence[str]]) -> List[str]:
@@ -129,6 +138,37 @@ def validate_job_coverage(expected_jobs: Sequence[NavhardJob], combined_rows: pd
     if duplicates:
         preview = ", ".join(f"{stage}:{token}" for stage, token in duplicates[:10])
         raise RuntimeError(f"Duplicate shard results detected for {len(duplicates)} jobs. First duplicates: {preview}")
+
+
+def summarize_prediction_diagnostics(rows: pd.DataFrame) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "num_protocol_invalid": 0,
+        "num_padded": 0,
+        "num_truncated": 0,
+        "num_zero_fallback": 0,
+        "action_tokens_count_mean": None,
+        "action_tokens_count_min": None,
+        "action_tokens_count_max": None,
+    }
+    if rows.empty:
+        return summary
+
+    if "protocol_valid" in rows.columns:
+        protocol_valid = pd.to_numeric(rows["protocol_valid"], errors="coerce").fillna(0)
+        summary["num_protocol_invalid"] = int((protocol_valid == 0).sum())
+    if "was_padded" in rows.columns:
+        summary["num_padded"] = int(pd.to_numeric(rows["was_padded"], errors="coerce").fillna(0).sum())
+    if "was_truncated" in rows.columns:
+        summary["num_truncated"] = int(pd.to_numeric(rows["was_truncated"], errors="coerce").fillna(0).sum())
+    if "used_zero_fallback" in rows.columns:
+        summary["num_zero_fallback"] = int(pd.to_numeric(rows["used_zero_fallback"], errors="coerce").fillna(0).sum())
+    if "action_tokens_count" in rows.columns:
+        action_counts = pd.to_numeric(rows["action_tokens_count"], errors="coerce").dropna()
+        if not action_counts.empty:
+            summary["action_tokens_count_mean"] = float(action_counts.mean())
+            summary["action_tokens_count_min"] = int(action_counts.min())
+            summary["action_tokens_count_max"] = int(action_counts.max())
+    return summary
 
 
 def compute_final_scores(pdm_score_df: pd.DataFrame) -> pd.DataFrame:
@@ -317,7 +357,8 @@ def finalize_merged_results(
     stage2_cols = [f"{col}_stage_two" for col in score_cols if col != "score"]
     score_cols = stage1_cols + stage2_cols + ["score"]
 
-    keep_cols = ["token", "valid"] + score_cols
+    diagnostic_cols = [col for col in PREDICTION_DIAGNOSTIC_COLUMNS if col in pdm_score_df.columns]
+    keep_cols = ["token", "valid"] + diagnostic_cols + score_cols
     pdm_score_df = pdm_score_df[keep_cols]
 
     summary_rows = []
@@ -371,6 +412,7 @@ def finalize_merged_results(
         ),
         "csv_path": str(csv_path) if csv_path is not None else None,
     }
+    summary.update(summarize_prediction_diagnostics(combined_rows))
 
     if write_artifacts:
         with open(Path(output_dir) / "summary.json", "w", encoding="utf-8") as f:

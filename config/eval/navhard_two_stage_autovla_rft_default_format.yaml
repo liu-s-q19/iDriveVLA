@@ -13,15 +13,15 @@ upstream:
     - scorer=pdm_scorer
 
 model:
-  config_path: /data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-mix-sft.yaml
-  checkpoint_path: /data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft20260312e4_ip190_2026-03-16_13-23-06/ckpt/rft-step6000-reward6.2188.ckpt
+  config_path: /data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format.yaml
+  checkpoint_path: /tmp/rft_default_format.ckpt
   sensor_data_path: /
   dataset_name: nuplan
   trajectory_sampling:
     num_poses: 8
     interval_length: 0.5
   lora_conf:
-    use_lora: null
+    use_lora: true
     task_type: CAUSAL_LM
     target_modules: [q_proj, v_proj, k_proj, o_proj]
     r: 8
@@ -33,7 +33,7 @@ traffic_agents:
   mode: reactive
 
 eval:
-  output_dir: /data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_rft20260312_step6000
+  output_dir: /data/liushiqi/AutoVLA/logs/eval/navhard_two_stage_autovla_rft_default_format
   max_stage_one_scenarios: null
   max_stage_two_scenarios: null
 

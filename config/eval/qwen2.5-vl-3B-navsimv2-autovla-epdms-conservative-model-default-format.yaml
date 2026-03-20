@@ -1,5 +1,5 @@
-name: qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative
-description: Conservative decode config for standard navsim v2 EPDMS AutoVLA evaluation
+name: qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative-default-format
+description: Conservative decode config for standard navsim v2 EPDMS AutoVLA evaluation, default-format
 
 model:
   use_cot: false

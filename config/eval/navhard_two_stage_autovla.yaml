@@ -18,10 +18,10 @@ model:
   sensor_data_path: /
   dataset_name: nuplan
   trajectory_sampling:
-    num_poses: 10
+    num_poses: 8
     interval_length: 0.5
   lora_conf:
-    use_lora: null
+    use_lora: false
     task_type: CAUSAL_LM
     target_modules: [q_proj, v_proj, k_proj, o_proj]
     r: 8

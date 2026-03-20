@@ -20,10 +20,11 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from prettytable import PrettyTable
-from transformers import AutoProcessor
 
 from dataset_utils.sft_dataset import SFTDataset
 from models.autovla import SFTAutoVLA
+from models.utils.model_backends import load_processor_for_model
+from models.utils.model_backends import resize_token_embeddings_for_model
 from tools.eval.planning_metrics import PlanningMetric
 
 
@@ -62,7 +63,7 @@ def main():
     config = load_config(args.config)
     
     # Initialize processor
-    processor = AutoProcessor.from_pretrained(config['model']['pretrained_model_path'], use_fast=True)
+    processor = load_processor_for_model(config['model']['pretrained_model_path'])
     
     # Build data config for SFTDataset from config
     
@@ -71,7 +72,7 @@ def main():
     # Load model
     checkpoint_path = Path(args.checkpoint)
     model = SFTAutoVLA(config)
-    model.autovla.vlm.resize_token_embeddings(len(processor.tokenizer))
+    resize_token_embeddings_for_model(model.autovla.vlm, len(processor.tokenizer))
     
     state_dict = torch.load(checkpoint_path, map_location=args.device)['state_dict']
     model.autovla.load_state_dict(state_dict, strict=False)

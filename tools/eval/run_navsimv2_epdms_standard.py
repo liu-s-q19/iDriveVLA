@@ -33,6 +33,13 @@ def _default_config_path() -> Path:
     return _repo_root() / "config" / "eval" / "navsimv2_epdms_standard.yaml"
 
 
+def _ensure_repo_root_import_path() -> None:
+    root = str(_repo_root())
+    if root in sys.path:
+        sys.path.remove(root)
+    sys.path.insert(0, root)
+
+
 def _setup_logging(log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     LOGGER.setLevel(logging.INFO)
@@ -401,6 +408,9 @@ def _evaluate_autovla_one_stage_tokens(
             else:
                 score_data = dict(score_row)
             row.update(score_data)
+            protocol_info = getattr(predictor, "last_protocol_result", None)
+            if isinstance(protocol_info, dict) and protocol_info:
+                row.update(protocol_info)
         except Exception:
             LOGGER.warning("AutoVLA standard evaluation failed for token=%s", token)
             LOGGER.warning(traceback.format_exc())
@@ -522,6 +532,7 @@ def _run_autovla_one_stage(
     if "model" not in cfg:
         raise ValueError("evaluation.mode=autovla_one_stage requires a top-level model section.")
 
+    _ensure_repo_root_import_path()
     from navsim.common.dataclasses import SensorConfig, Trajectory
     from navsim.common.dataloader import MetricCacheLoader, SceneLoader
     from navsim.evaluate.pdm_score import pdm_score

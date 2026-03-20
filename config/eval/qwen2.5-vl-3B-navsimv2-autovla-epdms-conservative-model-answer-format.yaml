@@ -1,5 +1,5 @@
-name: qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative
-description: Conservative decode config for standard navsim v2 EPDMS AutoVLA evaluation
+name: qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative-answer-format
+description: Conservative decode config for standard navsim v2 EPDMS AutoVLA evaluation, answer-format
 
 model:
   use_cot: false
@@ -8,7 +8,7 @@ model:
   train_lm_backbone: true
   codebook_cache_path: "codebook_cache/agent_vocab.pkl"
   action_answer_protocol:
-    enabled: false
+    enabled: true
   trajectory:
     num_poses: 8
     interval_length: 0.5

@@ -110,3 +110,74 @@ def test_finalize_merged_results_without_mappings_writes_expected_summary(tmp_pa
     assert combined_row["score"] == pytest.approx((0.8 + 0.6 + 0.4) / 3.0)
     assert pd.isna(combined_row["metric_a_stage_one"])
     assert pd.isna(combined_row["metric_a_stage_two"])
+
+
+def test_finalize_merged_results_aggregates_protocol_diagnostics(tmp_path):
+    combined_rows = pd.DataFrame(
+        [
+            {
+                "token": "orig_a",
+                "valid": True,
+                "frame_type": "ORIGINAL",
+                "score": 0.8,
+                "metric_a": 0.8,
+                "stage_name": "stage_one",
+                "protocol_valid": 1,
+                "protocol_reason": "",
+                "action_tokens_count": 8,
+                "raw_pose_count": 8,
+                "was_padded": 0,
+                "was_truncated": 0,
+                "used_zero_fallback": 0,
+            },
+            {
+                "token": "orig_b",
+                "valid": True,
+                "frame_type": "ORIGINAL",
+                "score": 0.6,
+                "metric_a": 0.6,
+                "stage_name": "stage_one",
+                "protocol_valid": 0,
+                "protocol_reason": "action_count_mismatch",
+                "action_tokens_count": 4,
+                "raw_pose_count": 4,
+                "was_padded": 1,
+                "was_truncated": 0,
+                "used_zero_fallback": 0,
+            },
+            {
+                "token": "syn_a",
+                "valid": True,
+                "frame_type": "SYNTHETIC",
+                "score": 0.4,
+                "metric_a": 0.4,
+                "stage_name": "stage_two",
+                "protocol_valid": 0,
+                "protocol_reason": "missing_answer_block",
+                "action_tokens_count": 0,
+                "raw_pose_count": 0,
+                "was_padded": 1,
+                "was_truncated": 0,
+                "used_zero_fallback": 1,
+            },
+        ]
+    )
+
+    _, summary = mod.finalize_merged_results(
+        combined_rows=combined_rows,
+        all_mappings={},
+        proposal_sampling="unused",
+        scene_frame_type_original="ORIGINAL",
+        scene_frame_type_synthetic="SYNTHETIC",
+        pdm_result_field_names=["metric_a"],
+        output_dir=tmp_path,
+        write_artifacts=False,
+    )
+
+    assert summary["num_protocol_invalid"] == 2
+    assert summary["num_padded"] == 2
+    assert summary["num_truncated"] == 0
+    assert summary["num_zero_fallback"] == 1
+    assert summary["action_tokens_count_mean"] == pytest.approx(4.0)
+    assert summary["action_tokens_count_min"] == 0
+    assert summary["action_tokens_count_max"] == 8

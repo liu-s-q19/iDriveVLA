@@ -10,6 +10,7 @@ import pandas as pd
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
+from tools.eval.navhard_two_stage_sharded import summarize_prediction_diagnostics
 from tools.eval.run_navhard_two_stage_autovla import AutoVLAPredictor, _ensure_upstream_navsim, _evaluate_token
 
 
@@ -158,6 +159,7 @@ def main() -> None:
         "partial_csv": str(partial_csv),
         "elapsed_sec": time.time() - t0,
     }
+    summary.update(summarize_prediction_diagnostics(partial_df))
     with open(shard_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     LOGGER.info("Shard finished: %s", json.dumps(summary, ensure_ascii=False))

@@ -2,10 +2,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import os
 import logging
+import sys
+import yaml
 
 import pandas as pd
+import pytest
+from omegaconf import OmegaConf
 
 from tools.eval import run_navsimv2_epdms_standard as mod
+from tools.eval import run_navhard_two_stage_autovla as navhard_mod
 
 
 class _FakeTrajectory:
@@ -109,6 +114,17 @@ def test_run_evaluation_dispatches_by_mode():
     assert calls == [("autovla", True)]
 
 
+def test_ensure_repo_root_import_path_prepends_repo_root(monkeypatch):
+    original = ["/tmp/other", str(Path(mod.__file__).resolve().parents[2]), "/tmp/third"]
+    monkeypatch.setattr(sys, "path", list(original))
+
+    mod._ensure_repo_root_import_path()
+
+    repo_root = str(Path(mod.__file__).resolve().parents[2])
+    assert sys.path[0] == repo_root
+    assert sys.path.count(repo_root) == 1
+
+
 def test_run_autovla_one_stage_from_components_writes_outputs(tmp_path):
     class _Predictor:
         def predict(self, payload):
@@ -205,6 +221,270 @@ def test_evaluate_autovla_one_stage_tokens_accepts_tuple_pdm_score():
     )
 
     assert df.loc[df["token"] == "tok_a", "score"].item() == 0.25
+
+
+def test_evaluate_autovla_one_stage_tokens_includes_protocol_metadata():
+    predictor = _FakePredictor()
+    predictor.last_protocol_result = {
+        "protocol_valid": 0,
+        "invalid_reason": "action_count_mismatch",
+        "answer_action_tokens_len": 4,
+    }
+
+    def payload_builder(token, scene, sensor_root, dataset_name, trajectory_num_poses):
+        return {
+            "token": token,
+            "predicted_poses": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        }
+
+    def pdm_score_fn(metric_cache, model_trajectory, future_sampling, simulator, scorer, traffic_agents_policy):
+        return pd.DataFrame([{"score": 0.25, "invalid": 0}])
+
+    df = mod._evaluate_autovla_one_stage_tokens(
+        tokens=["tok_a"],
+        scene_loader=_FakeSceneLoader(),
+        metric_cache_loader=_FakeMetricCacheLoader(),
+        predictor=predictor,
+        pdm_score_fn=pdm_score_fn,
+        simulator=SimpleNamespace(proposal_sampling="proposal_sampling"),
+        scorer=object(),
+        traffic_agents_policy=object(),
+        sensor_root=Path("/tmp/sensors"),
+        dataset_name="navsim",
+        trajectory_num_poses=2,
+        trajectory_interval=0.5,
+        trajectory_cls=_FakeTrajectory,
+        payload_builder=payload_builder,
+    )
+
+    row = df.iloc[0].to_dict()
+    assert row["protocol_valid"] == 0
+    assert row["invalid_reason"] == "action_count_mismatch"
+    assert row["answer_action_tokens_len"] == 4
+
+
+def test_navhard_prediction_diagnostics_capture_protocol_and_padding_flags():
+    diagnostics = navhard_mod._build_prediction_diagnostics(
+        protocol_result={
+            "protocol_valid": 0,
+            "invalid_reason": "action_count_mismatch",
+            "answer_action_tokens_len": 4,
+        },
+        raw_pose_count=4,
+        target_num_poses=8,
+    )
+
+    assert diagnostics == {
+        "protocol_valid": 0,
+        "protocol_reason": "action_count_mismatch",
+        "action_tokens_count": 4,
+        "raw_pose_count": 4,
+        "was_padded": 1,
+        "was_truncated": 0,
+        "used_zero_fallback": 0,
+    }
+
+
+def test_navhard_prediction_diagnostics_marks_zero_fallback():
+    diagnostics = navhard_mod._build_prediction_diagnostics(
+        protocol_result={
+            "protocol_valid": 0,
+            "invalid_reason": "missing_answer_block",
+            "answer_action_tokens_len": 0,
+        },
+        raw_pose_count=0,
+        target_num_poses=8,
+    )
+
+    assert diagnostics["protocol_valid"] == 0
+    assert diagnostics["protocol_reason"] == "missing_answer_block"
+    assert diagnostics["action_tokens_count"] == 0
+    assert diagnostics["raw_pose_count"] == 0
+    assert diagnostics["was_padded"] == 1
+    assert diagnostics["was_truncated"] == 0
+    assert diagnostics["used_zero_fallback"] == 1
+
+
+def test_autovla_predictor_auto_enables_lora_for_rft_checkpoint(tmp_path, monkeypatch):
+    config_path = tmp_path / "autovla.yaml"
+    config_path.write_text(yaml.safe_dump({"model": {"dummy": True}}), encoding="utf-8")
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs):
+            self.device = "cpu"
+            self.vlm = object()
+            self.load_calls = []
+
+        def state_dict(self):
+            return {
+                "vlm.base_model.model.layers.0.self_attn.q_proj.base_layer.weight": 1,
+                "vlm.base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": 1,
+                "vlm.base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight": 1,
+            }
+
+        def load_state_dict(self, state_dict, strict=False):
+            self.load_calls.append((state_dict, strict))
+            return SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+        def eval(self):
+            return self
+
+    fake_model = _FakeModel()
+    get_peft_calls = []
+
+    def fake_autovla(*args, **kwargs):
+        return fake_model
+
+    def fake_get_peft_model(vlm, lora_config):
+        get_peft_calls.append(lora_config)
+        return "wrapped_vlm"
+
+    monkeypatch.setattr(navhard_mod, "AutoVLA", fake_autovla)
+    monkeypatch.setattr(navhard_mod, "get_peft_model", fake_get_peft_model)
+    monkeypatch.setattr(
+        navhard_mod.torch,
+        "load",
+        lambda *args, **kwargs: {
+            "state_dict": {
+                "autovla.vlm.base_model.model.layers.0.self_attn.q_proj.base_layer.weight": 1,
+                "autovla.vlm.base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight": 2,
+                "autovla.vlm.base_model.model.layers.0.self_attn.q_proj.lora_B.default.weight": 3,
+            }
+        },
+    )
+
+    model_cfg = OmegaConf.create(
+        {
+            "config_path": str(config_path),
+            "checkpoint_path": "/tmp/fake-rft.ckpt",
+            "sensor_data_path": "/",
+            "dataset_name": "navsim",
+            "device": "cpu",
+            "prediction_seed_mode": "none",
+            "prediction_seed_base": 0,
+            "lora_conf": {
+                "use_lora": None,
+                "task_type": "CAUSAL_LM",
+                "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+                "r": 8,
+                "lora_alpha": 8,
+                "lora_dropout": 0.1,
+                "bias": "none",
+            },
+        }
+    )
+    trajectory_cfg = OmegaConf.create({"num_poses": 10, "interval_length": 0.5})
+
+    navhard_mod.AutoVLAPredictor(model_cfg, trajectory_cfg)
+
+    assert len(get_peft_calls) == 1
+    assert fake_model.vlm == "wrapped_vlm"
+
+
+def test_autovla_predictor_fails_on_checkpoint_mismatches(tmp_path, monkeypatch):
+    config_path = tmp_path / "autovla.yaml"
+    config_path.write_text(yaml.safe_dump({"model": {"dummy": True}}), encoding="utf-8")
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs):
+            self.device = "cpu"
+            self.vlm = object()
+
+        def state_dict(self):
+            return {
+                "vlm.model.layers.0.self_attn.q_proj.weight": 1,
+                "vlm.model.layers.0.self_attn.k_proj.weight": 1,
+            }
+
+        def load_state_dict(self, state_dict, strict=False):
+            return SimpleNamespace(
+                missing_keys=["vlm.model.layers.0.self_attn.k_proj.weight"],
+                unexpected_keys=["vlm.language_model.model.layers.0.self_attn.q_proj.weight"],
+            )
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(navhard_mod, "AutoVLA", lambda *args, **kwargs: _FakeModel())
+    monkeypatch.setattr(
+        navhard_mod.torch,
+        "load",
+        lambda *args, **kwargs: {
+            "state_dict": {
+                "autovla.vlm.language_model.model.layers.0.self_attn.q_proj.weight": 1,
+            }
+        },
+    )
+
+    model_cfg = OmegaConf.create(
+        {
+            "config_path": str(config_path),
+            "checkpoint_path": "/tmp/fake-mismatch.ckpt",
+            "sensor_data_path": "/",
+            "dataset_name": "navsim",
+            "device": "cpu",
+            "prediction_seed_mode": "none",
+            "prediction_seed_base": 0,
+            "lora_conf": {
+                "use_lora": False,
+            },
+        }
+    )
+    trajectory_cfg = OmegaConf.create({"num_poses": 10, "interval_length": 0.5})
+
+    with pytest.raises(RuntimeError, match="Checkpoint incompatible"):
+        navhard_mod.AutoVLAPredictor(model_cfg, trajectory_cfg)
+
+
+def test_autovla_predictor_fails_when_no_exact_keys_match(tmp_path, monkeypatch):
+    config_path = tmp_path / "autovla.yaml"
+    config_path.write_text(yaml.safe_dump({"model": {"dummy": True}}), encoding="utf-8")
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs):
+            self.device = "cpu"
+            self.vlm = object()
+
+        def state_dict(self):
+            return {
+                "vlm.model.layers.0.self_attn.q_proj.weight": 1,
+            }
+
+        def load_state_dict(self, state_dict, strict=False):
+            return SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(navhard_mod, "AutoVLA", lambda *args, **kwargs: _FakeModel())
+    monkeypatch.setattr(
+        navhard_mod.torch,
+        "load",
+        lambda *args, **kwargs: {
+            "state_dict": {
+                "autovla.vlm.language_model.model.layers.0.self_attn.q_proj.weight": 1,
+            }
+        },
+    )
+
+    model_cfg = OmegaConf.create(
+        {
+            "config_path": str(config_path),
+            "checkpoint_path": "/tmp/fake-zero-exact.ckpt",
+            "sensor_data_path": "/",
+            "dataset_name": "navsim",
+            "device": "cpu",
+            "prediction_seed_mode": "none",
+            "prediction_seed_base": 0,
+            "lora_conf": {
+                "use_lora": False,
+            },
+        }
+    )
+    trajectory_cfg = OmegaConf.create({"num_poses": 10, "interval_length": 0.5})
+
+    with pytest.raises(RuntimeError, match="matched_exact=0"):
+        navhard_mod.AutoVLAPredictor(model_cfg, trajectory_cfg)
 
 
 def test_apply_process_env_sets_configured_variables(monkeypatch):

@@ -14,30 +14,30 @@ upstream:
     - scorer=pdm_scorer
     - agent=constant_velocity_agent
     - metric_cache_path=/data/dataset/navsim/metric_cache_v2/navtest_full_2026-03-07_15-40-49
-    - output_dir=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms/navtest_default
+    - output_dir=/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft_answer_format/navtest_default
 
 run:
   env_name: autolsqv2
-  output_dir: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms
-  log_path: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms/run_navsimv2_epdms_standard.log
+  output_dir: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft_answer_format
+  log_path: /data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_rft_answer_format/run_navsimv2_epdms_standard_autovla_rft_answer_format.log
   env_vars:
     NUPLAN_MAPS_ROOT: /data/dataset/navsim/maps
     OPENSCENE_DATA_ROOT: /data/dataset/navsim
     NUPLAN_MAP_VERSION: nuplan-maps-v1.0
 
 evaluation:
-  mode: standard_baseline
+  mode: autovla_one_stage
 
 model:
-  config_path: /data/liushiqi/AutoVLA/config/training/qwen2.5-vl-3B-navsimv2-mix-sft.yaml
-  checkpoint_path: /tmp/sft_epoch4_loss09352.ckpt
+  config_path: /data/liushiqi/AutoVLA/config/eval/qwen2.5-vl-3B-navsimv2-autovla-epdms-conservative-model-answer-format.yaml
+  checkpoint_path: /tmp/rft_answer_format.ckpt
   sensor_data_path: /
   dataset_name: navsim
   trajectory_sampling:
     num_poses: 8
     interval_length: 0.5
   lora_conf:
-    use_lora: null
+    use_lora: true
     task_type: CAUSAL_LM
     target_modules: [q_proj, v_proj, k_proj, o_proj]
     r: 8
