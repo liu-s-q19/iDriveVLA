@@ -171,6 +171,20 @@ def get_input_ids_tensor(batch):
     return getattr(batch, "input_ids")
 
 
+def extract_completion_ids_from_generate_output(generated_ids: torch.Tensor, prompt_input_ids: torch.Tensor) -> torch.Tensor:
+    if generated_ids.ndim != 2 or prompt_input_ids.ndim != 2:
+        raise ValueError("generated_ids and prompt_input_ids must be rank-2 tensors")
+
+    if generated_ids.shape[0] != prompt_input_ids.shape[0]:
+        raise ValueError("generated_ids and prompt_input_ids must have the same batch dimension")
+
+    prompt_len = int(prompt_input_ids.shape[1])
+    prompt_input_ids_aligned = prompt_input_ids.to(device=generated_ids.device)
+    if generated_ids.shape[1] >= prompt_len and torch.equal(generated_ids[:, :prompt_len], prompt_input_ids_aligned):
+        return generated_ids[:, prompt_len:]
+    return generated_ids
+
+
 def silence_internvl_runtime_prints(vlm) -> None:
     global _INTERNVL_PRINT_FILTER_INSTALLED
 

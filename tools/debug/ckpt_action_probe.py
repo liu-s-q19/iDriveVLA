@@ -9,6 +9,7 @@ from transformers import AutoProcessor
 
 from dataset_utils.sft_dataset import DataCollator, SFTDataset
 from models.autovla import SFTAutoVLA
+from models.utils.model_backends import extract_completion_ids_from_generate_output
 
 
 def parse_args():
@@ -131,7 +132,10 @@ def main():
                         generate_inputs[key] = value
 
             outputs = model.autovla.vlm.generate(**generate_inputs, **gen_kwargs)
-            completion_ids = outputs[:, prompt_len:][0]
+            completion_ids = extract_completion_ids_from_generate_output(
+                outputs,
+                generate_inputs["input_ids"],
+            )[0]
             action_candidates = int((completion_ids >= model.autovla.action_start_id).sum().item())
             action_tokens = model._extract_action_tokens_from_completion(
                 completion_ids, model.autovla.processor.tokenizer

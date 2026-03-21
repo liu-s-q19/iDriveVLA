@@ -27,6 +27,7 @@ from models.utils.model_backends import initialize_model_runtime_state
 from models.utils.model_backends import filter_generate_inputs_for_model
 from models.utils.model_backends import resolve_generate_length_kwargs
 from models.utils.model_backends import get_input_ids_tensor
+from models.utils.model_backends import extract_completion_ids_from_generate_output
 from models.utils.grpo_metrics import masked_token_mean
 from models.utils.grpo_log_keys import progress_bar_metric_names
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -784,7 +785,10 @@ class SFTAutoVLA(pl.LightningModule):
                 generate_inputs = self.autovla._align_model_inputs(generate_inputs)
                 generate_inputs = filter_generate_inputs_for_model(vlm, generate_inputs)
                 prompt_completion_ids = vlm.generate(**generate_inputs, **gen_kwargs)
-            completion_ids = prompt_completion_ids[:, prompt_len:][0]
+            completion_ids = extract_completion_ids_from_generate_output(
+                prompt_completion_ids,
+                generate_inputs["input_ids"],
+            )[0]
             action_candidates = int((completion_ids >= self.autovla.action_start_id).sum().item())
             action_tokens = self._extract_action_tokens_from_completion(
                 completion_ids, self.autovla.processor.tokenizer
@@ -1115,11 +1119,8 @@ class AutoVLA(torch.nn.Module):
         outputs = self.vlm.generate(**generate_inputs, **gen_kwargs)
 
         input_ids = get_input_ids_tensor(inputs)
-        outputs_trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, outputs)
-        ]
-
-        outputs_trimmed = outputs_trimmed[0].cpu()
+        outputs_trimmed = extract_completion_ids_from_generate_output(outputs, input_ids)[0].cpu()
+        generated_action_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
         cot_results = self.processor.decode(outputs_trimmed)
         if self._action_answer_protocol_enabled:
             parse_result = self._parse_action_answer_completion(outputs_trimmed)

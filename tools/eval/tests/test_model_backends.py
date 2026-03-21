@@ -11,6 +11,18 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class TestModelBackends(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for mixed-device completion extraction test")
+    def test_extract_completion_ids_handles_cpu_prompt_and_cuda_generation(self):
+        from models.utils.model_backends import extract_completion_ids_from_generate_output
+
+        prompt_input_ids = torch.tensor([[11, 12, 13]], dtype=torch.long, device="cpu")
+        generated_ids = torch.tensor([[11, 12, 13, 21, 22]], dtype=torch.long, device="cuda")
+
+        completion_ids = extract_completion_ids_from_generate_output(generated_ids, prompt_input_ids)
+
+        self.assertEqual(completion_ids.device.type, "cuda")
+        self.assertTrue(torch.equal(completion_ids.cpu(), torch.tensor([[21, 22]], dtype=torch.long)))
+
     def test_detects_qwen_and_internvl_model_families(self):
         from models.utils.model_backends import detect_model_family
 
@@ -468,6 +480,80 @@ class TestModelBackends(unittest.TestCase):
         resolved = get_input_ids_tensor(SimpleNamespace(input_ids=input_ids))
 
         self.assertIs(resolved, input_ids)
+
+    def test_extract_completion_ids_trims_prompt_prefixed_generate_output(self):
+        from models.utils.model_backends import extract_completion_ids_from_generate_output
+
+        prompt_ids = torch.tensor([[11, 12, 13]])
+        generated_ids = torch.tensor([[11, 12, 13, 21, 22]])
+
+        completion_ids = extract_completion_ids_from_generate_output(generated_ids, prompt_ids)
+
+        self.assertTrue(torch.equal(completion_ids, torch.tensor([[21, 22]])))
+
+    def test_extract_completion_ids_keeps_completion_only_generate_output(self):
+        from models.utils.model_backends import extract_completion_ids_from_generate_output
+
+        prompt_ids = torch.tensor([[11, 12, 13]])
+        generated_ids = torch.tensor([[21, 22]])
+
+        completion_ids = extract_completion_ids_from_generate_output(generated_ids, prompt_ids)
+
+        self.assertTrue(torch.equal(completion_ids, generated_ids))
+
+    def test_sft_messages_with_assistant_do_not_append_generation_prompt(self):
+        from dataset_utils.sft_dataset import build_sft_chat_text
+
+        class FakeProcessor:
+            def __init__(self):
+                self.calls = []
+
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, add_vision_id=False):
+                self.calls.append(
+                    {
+                        "messages": messages,
+                        "tokenize": tokenize,
+                        "add_generation_prompt": add_generation_prompt,
+                        "add_vision_id": add_vision_id,
+                    }
+                )
+                rendered = "|".join(f"{m['role']}:{m['content']}" for m in messages)
+                if add_generation_prompt:
+                    rendered += "|assistant:"
+                return rendered
+
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "usr"},
+            {"role": "assistant", "content": "answer"},
+        ]
+
+        internvl = FakeProcessor()
+        qwen = FakeProcessor()
+
+        internvl_text = build_sft_chat_text(internvl, messages)
+        qwen_text = build_sft_chat_text(qwen, messages, add_vision_id=True)
+
+        self.assertEqual(
+            internvl.calls[0],
+            {
+                "messages": messages,
+                "tokenize": False,
+                "add_generation_prompt": False,
+                "add_vision_id": False,
+            },
+        )
+        self.assertEqual(
+            qwen.calls[0],
+            {
+                "messages": messages,
+                "tokenize": False,
+                "add_generation_prompt": False,
+                "add_vision_id": True,
+            },
+        )
+        self.assertEqual(internvl_text, "system:sys|user:usr|assistant:answer")
+        self.assertEqual(qwen_text, "system:sys|user:usr|assistant:answer")
 
 
 if __name__ == "__main__":
