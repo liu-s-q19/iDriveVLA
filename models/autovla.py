@@ -664,11 +664,17 @@ class GRPOAutoVLA(pl.LightningModule):
             torch.nn.utils.clip_grad_value_(params_with_grad, clip_value=gradient_clip_val)
 
     def on_save_checkpoint(self, checkpoint: dict):
-        # only save main model
+        # Keep full model state for strict Lightning resume.
+        return
+
+    def on_load_checkpoint(self, checkpoint: dict):
+        # Older checkpoints may not contain reference_model.*; backfill for compatibility.
         sd = checkpoint.get("state_dict", {})
-        for k in list(sd):
-            if k.startswith("reference_model."):
-                sd.pop(k)
+        has_reference = any(k.startswith("reference_model.") for k in sd.keys())
+        if (not has_reference) and hasattr(self, "reference_model"):
+            ref_sd = self.reference_model.state_dict()
+            for k, v in ref_sd.items():
+                sd[f"reference_model.{k}"] = v
 
 class SFTAutoVLA(pl.LightningModule):
     def __init__(self, config: dict):
