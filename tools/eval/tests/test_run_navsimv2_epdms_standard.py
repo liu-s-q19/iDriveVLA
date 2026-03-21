@@ -319,6 +319,8 @@ def test_navhard_prediction_diagnostics_capture_protocol_and_padding_flags():
         "protocol_valid": 0,
         "protocol_reason": "action_count_mismatch",
         "action_tokens_count": 4,
+        "protocol_action_tokens_count": 4,
+        "generated_action_tokens_count": 0,
         "raw_pose_count": 4,
         "was_padded": 1,
         "was_truncated": 0,
@@ -340,10 +342,37 @@ def test_navhard_prediction_diagnostics_marks_zero_fallback():
     assert diagnostics["protocol_valid"] == 0
     assert diagnostics["protocol_reason"] == "missing_answer_block"
     assert diagnostics["action_tokens_count"] == 0
+    assert diagnostics["protocol_action_tokens_count"] == 0
+    assert diagnostics["generated_action_tokens_count"] == 0
     assert diagnostics["raw_pose_count"] == 0
     assert diagnostics["was_padded"] == 1
     assert diagnostics["was_truncated"] == 0
     assert diagnostics["used_zero_fallback"] == 1
+
+
+def test_navhard_prediction_diagnostics_falls_back_to_raw_action_tokens_when_protocol_disabled():
+    diagnostics = navhard_mod._build_prediction_diagnostics(
+        protocol_result={
+            "protocol_valid": 0,
+            "invalid_reason": "not_run",
+            "answer_action_tokens_len": 0,
+        },
+        raw_pose_count=6,
+        target_num_poses=8,
+        raw_action_tokens_count=6,
+    )
+
+    assert diagnostics == {
+        "protocol_valid": 0,
+        "protocol_reason": "not_run",
+        "action_tokens_count": 6,
+        "protocol_action_tokens_count": 0,
+        "generated_action_tokens_count": 6,
+        "raw_pose_count": 6,
+        "was_padded": 1,
+        "was_truncated": 0,
+        "used_zero_fallback": 0,
+    }
 
 
 def test_autovla_predictor_auto_enables_lora_for_rft_checkpoint(tmp_path, monkeypatch):

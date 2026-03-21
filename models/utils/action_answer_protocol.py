@@ -27,6 +27,40 @@ def _normalize_completion_ids(completion_ids: torch.Tensor, tokenizer) -> List[i
     return token_ids
 
 
+def extract_action_tokens_from_first_answer_block(
+    completion_ids: torch.Tensor,
+    tokenizer,
+    action_start_id: int,
+    answer_open: str = "<answer>",
+    answer_close: str = "</answer>",
+) -> List[int]:
+    token_ids = _normalize_completion_ids(completion_ids, tokenizer)
+    if not token_ids:
+        return []
+
+    token_texts = [tokenizer.decode([token_id]) for token_id in token_ids]
+    completion_text = "".join(token_texts)
+    start_char = completion_text.find(answer_open)
+    if start_char < 0:
+        return []
+    end_char = completion_text.find(answer_close, start_char + len(answer_open))
+    if end_char < 0:
+        return []
+
+    answer_token_ids: List[int] = []
+    answer_content_start = start_char + len(answer_open)
+    answer_content_end = end_char
+    cursor = 0
+    for token_id, token_text in zip(token_ids, token_texts):
+        next_cursor = cursor + len(token_text)
+        overlaps_answer_content = (cursor < answer_content_end) and (next_cursor > answer_content_start)
+        if overlaps_answer_content and token_id >= action_start_id and _ACTION_TOKEN_RE.fullmatch(token_text.strip()):
+            answer_token_ids.append(token_id)
+        cursor = next_cursor
+
+    return answer_token_ids
+
+
 def parse_action_answer_completion(
     completion_ids: torch.Tensor,
     tokenizer,

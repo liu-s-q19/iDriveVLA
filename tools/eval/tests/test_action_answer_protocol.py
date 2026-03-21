@@ -2,6 +2,7 @@ import unittest
 
 import torch
 
+from models.utils.action_answer_protocol import extract_action_tokens_from_first_answer_block
 from models.utils.action_answer_protocol import parse_action_answer_completion
 
 
@@ -116,6 +117,24 @@ class TestActionAnswerProtocol(unittest.TestCase):
         self.assertFalse(result.is_valid)
         self.assertEqual(result.invalid_reason, "action_count_mismatch")
         self.assertEqual(result.action_token_count, 9)
+
+    def test_extract_first_answer_block_tokens_ignores_tail_text(self):
+        action_ids = extract_action_tokens_from_first_answer_block(
+            torch.tensor([1, 3, 101, 102, 103, 104, 105, 106, 107, 108, 2, 6, 101, 102]),
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+        )
+
+        self.assertEqual(action_ids, [101, 102, 103, 104, 105, 106, 107, 108])
+
+    def test_extract_first_answer_block_tokens_returns_partial_block_without_tail_tokens(self):
+        action_ids = extract_action_tokens_from_first_answer_block(
+            torch.tensor([1, 3, 101, 102, 103, 2, 6, 107, 108]),
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+        )
+
+        self.assertEqual(action_ids, [101, 102, 103])
 
 
 if __name__ == "__main__":

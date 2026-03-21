@@ -16,6 +16,8 @@ PREDICTION_DIAGNOSTIC_COLUMNS = [
     "protocol_valid",
     "protocol_reason",
     "action_tokens_count",
+    "protocol_action_tokens_count",
+    "generated_action_tokens_count",
     "raw_pose_count",
     "was_padded",
     "was_truncated",
@@ -149,6 +151,12 @@ def summarize_prediction_diagnostics(rows: pd.DataFrame) -> Dict[str, Any]:
         "action_tokens_count_mean": None,
         "action_tokens_count_min": None,
         "action_tokens_count_max": None,
+        "protocol_action_tokens_count_mean": None,
+        "protocol_action_tokens_count_min": None,
+        "protocol_action_tokens_count_max": None,
+        "generated_action_tokens_count_mean": None,
+        "generated_action_tokens_count_min": None,
+        "generated_action_tokens_count_max": None,
     }
     if rows.empty:
         return summary
@@ -168,6 +176,18 @@ def summarize_prediction_diagnostics(rows: pd.DataFrame) -> Dict[str, Any]:
             summary["action_tokens_count_mean"] = float(action_counts.mean())
             summary["action_tokens_count_min"] = int(action_counts.min())
             summary["action_tokens_count_max"] = int(action_counts.max())
+    if "protocol_action_tokens_count" in rows.columns:
+        protocol_action_counts = pd.to_numeric(rows["protocol_action_tokens_count"], errors="coerce").dropna()
+        if not protocol_action_counts.empty:
+            summary["protocol_action_tokens_count_mean"] = float(protocol_action_counts.mean())
+            summary["protocol_action_tokens_count_min"] = int(protocol_action_counts.min())
+            summary["protocol_action_tokens_count_max"] = int(protocol_action_counts.max())
+    if "generated_action_tokens_count" in rows.columns:
+        generated_action_counts = pd.to_numeric(rows["generated_action_tokens_count"], errors="coerce").dropna()
+        if not generated_action_counts.empty:
+            summary["generated_action_tokens_count_mean"] = float(generated_action_counts.mean())
+            summary["generated_action_tokens_count_min"] = int(generated_action_counts.min())
+            summary["generated_action_tokens_count_max"] = int(generated_action_counts.max())
     return summary
 
 

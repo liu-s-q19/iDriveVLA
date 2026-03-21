@@ -15,6 +15,7 @@ from transformers import AutoProcessor
 from qwen_vl_utils import process_vision_info
 from models.action_tokenizer import ActionTokenizer
 from models.utils.action_answer_protocol import parse_action_answer_completion
+from models.utils.action_answer_protocol import extract_action_tokens_from_first_answer_block
 from models.utils.action_answer_protocol import summarize_group_outcomes
 from models.utils.model_backends import detect_model_family
 from models.utils.model_backends import get_language_backbone
@@ -1009,6 +1010,10 @@ class AutoVLA(torch.nn.Module):
             "answer_block_at_tail": 0,
             "answer_action_tokens_len": 0,
         }
+        self._last_generation_stats = {
+            "raw_action_tokens_count": 0,
+            "decoded_action_pose_count": 0,
+        }
 
     def _vision_dtype(self) -> torch.dtype:
         vision_backbone = get_vision_backbone(self.vlm)
@@ -1100,6 +1105,10 @@ class AutoVLA(torch.nn.Module):
         inputs = self.get_prompt(input_features)
         model_inputs = {k: v.to(self.device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
         model_inputs = self._align_model_inputs(model_inputs)
+        self._last_generation_stats = {
+            "raw_action_tokens_count": 0,
+            "decoded_action_pose_count": 0,
+        }
 
         gen_kwargs = {
             "do_sample": True,
@@ -1129,14 +1138,30 @@ class AutoVLA(torch.nn.Module):
                 trajectory = self._decode_protocol_trajectory(parse_result.action_token_ids)
             else:
                 trajectory = torch.zeros((0, 3), dtype=torch.float32)
+            self._last_generation_stats = {
+                "raw_action_tokens_count": int(generated_action_tokens.numel()),
+                "decoded_action_pose_count": int(trajectory.shape[0]),
+            }
         else:
             self._set_last_protocol_result(None)
-            actions_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
+            answer_block_action_ids = extract_action_tokens_from_first_answer_block(
+                outputs_trimmed,
+                tokenizer=self.processor.tokenizer,
+                action_start_id=self.action_start_id,
+            )
+            if answer_block_action_ids:
+                actions_tokens = torch.tensor(answer_block_action_ids, dtype=torch.long)
+            else:
+                actions_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
             decoded = self.action_tokenizer.decode_token_ids_to_trajectory(actions_tokens)
             if isinstance(decoded, torch.Tensor) and decoded.ndim == 3 and decoded.shape[2] == 3 and decoded.shape[0] > 0:
                 trajectory = decoded[0, 1:]
             else:
                 trajectory = torch.zeros((0, 3), dtype=torch.float32)
+            self._last_generation_stats = {
+                "raw_action_tokens_count": int(actions_tokens.numel()),
+                "decoded_action_pose_count": int(trajectory.shape[0]),
+            }
         trajectory = self._normalize_predicted_trajectory(trajectory)
 
         return trajectory, cot_results

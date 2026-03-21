@@ -185,13 +185,19 @@ def _build_prediction_diagnostics(
     protocol_result: Optional[Dict[str, Any]],
     raw_pose_count: int,
     target_num_poses: int,
+    raw_action_tokens_count: int = 0,
 ) -> Dict[str, Any]:
     result = dict(protocol_result or {})
     raw_count = max(int(raw_pose_count), 0)
     target_len = max(int(target_num_poses), 0)
     protocol_valid = int(result.get("protocol_valid", 0))
     protocol_reason = str(result.get("invalid_reason", "not_run") or "")
-    action_tokens_count = int(result.get("answer_action_tokens_len", 0) or 0)
+    protocol_action_tokens_count = int(result.get("answer_action_tokens_len", 0) or 0)
+    generated_action_tokens_count = max(int(raw_action_tokens_count), 0)
+    if protocol_reason == "not_run":
+        action_tokens_count = generated_action_tokens_count
+    else:
+        action_tokens_count = protocol_action_tokens_count
     was_padded = int(raw_count < target_len)
     was_truncated = int(raw_count > target_len)
     used_zero_fallback = int(raw_count == 0 and target_len > 0)
@@ -199,6 +205,8 @@ def _build_prediction_diagnostics(
         "protocol_valid": protocol_valid,
         "protocol_reason": protocol_reason,
         "action_tokens_count": action_tokens_count,
+        "protocol_action_tokens_count": protocol_action_tokens_count,
+        "generated_action_tokens_count": generated_action_tokens_count,
         "raw_pose_count": raw_count,
         "was_padded": was_padded,
         "was_truncated": was_truncated,
@@ -332,14 +340,16 @@ class AutoVLAPredictor:
         with torch.no_grad():
             traj_tensor, cot = self.model.predict(features)
         self.last_protocol_result = dict(getattr(self.model, "_last_protocol_result", {}))
+        generation_stats = dict(getattr(self.model, "_last_generation_stats", {}))
 
         traj_np = traj_tensor.detach().cpu().numpy().astype(np.float32)
         if traj_np.ndim != 2 or traj_np.shape[1] != 3:
             raise ValueError(f"invalid trajectory shape from model: {traj_np.shape}")
         self.last_prediction_diagnostics = _build_prediction_diagnostics(
             self.last_protocol_result,
-            raw_pose_count=int(traj_np.shape[0]),
+            raw_pose_count=int(generation_stats.get("decoded_action_pose_count", traj_np.shape[0])),
             target_num_poses=self.num_poses,
+            raw_action_tokens_count=int(generation_stats.get("raw_action_tokens_count", 0)),
         )
         traj_np = _pad_trajectory(traj_np, self.num_poses)
 

@@ -125,6 +125,8 @@ def test_finalize_merged_results_aggregates_protocol_diagnostics(tmp_path):
                 "protocol_valid": 1,
                 "protocol_reason": "",
                 "action_tokens_count": 8,
+                "protocol_action_tokens_count": 8,
+                "generated_action_tokens_count": 8,
                 "raw_pose_count": 8,
                 "was_padded": 0,
                 "was_truncated": 0,
@@ -140,6 +142,8 @@ def test_finalize_merged_results_aggregates_protocol_diagnostics(tmp_path):
                 "protocol_valid": 0,
                 "protocol_reason": "action_count_mismatch",
                 "action_tokens_count": 4,
+                "protocol_action_tokens_count": 4,
+                "generated_action_tokens_count": 2,
                 "raw_pose_count": 4,
                 "was_padded": 1,
                 "was_truncated": 0,
@@ -155,6 +159,8 @@ def test_finalize_merged_results_aggregates_protocol_diagnostics(tmp_path):
                 "protocol_valid": 0,
                 "protocol_reason": "missing_answer_block",
                 "action_tokens_count": 0,
+                "protocol_action_tokens_count": 0,
+                "generated_action_tokens_count": 0,
                 "raw_pose_count": 0,
                 "was_padded": 1,
                 "was_truncated": 0,
@@ -181,3 +187,9 @@ def test_finalize_merged_results_aggregates_protocol_diagnostics(tmp_path):
     assert summary["action_tokens_count_mean"] == pytest.approx(4.0)
     assert summary["action_tokens_count_min"] == 0
     assert summary["action_tokens_count_max"] == 8
+    assert summary["protocol_action_tokens_count_mean"] == pytest.approx(4.0)
+    assert summary["protocol_action_tokens_count_min"] == 0
+    assert summary["protocol_action_tokens_count_max"] == 8
+    assert summary["generated_action_tokens_count_mean"] == pytest.approx((8 + 2 + 0) / 3)
+    assert summary["generated_action_tokens_count_min"] == 0
+    assert summary["generated_action_tokens_count_max"] == 8
