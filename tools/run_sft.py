@@ -83,6 +83,53 @@ def resolve_trainer_devices(configured_devices, launched_by_torchrun):
     return configured_devices
 
 
+def build_training_strategy(training_cfg, model_family):
+    strategy_name = str(training_cfg.get("distributed_strategy", "fsdp")).lower()
+    if strategy_name == "ddp":
+        ddp_find_unused = bool(training_cfg.get("ddp_find_unused_parameters", False))
+        ddp_kwargs = {
+            "find_unused_parameters": ddp_find_unused,
+        }
+        ddp_static_graph = training_cfg.get("ddp_static_graph")
+        if ddp_static_graph is not None:
+            ddp_kwargs["static_graph"] = bool(ddp_static_graph)
+        if ddp_kwargs.get("static_graph"):
+            ddp_kwargs["find_unused_parameters"] = False
+        return DDPStrategy(**ddp_kwargs)
+
+    if strategy_name == "fsdp":
+        fsdp_cfg = training_cfg.get("fsdp", {})
+        backward_prefetch_name = str(fsdp_cfg.get("backward_prefetch", "BACKWARD_PRE")).upper()
+        if not hasattr(BackwardPrefetch, backward_prefetch_name):
+            raise ValueError(f"Unknown FSDP backward_prefetch={backward_prefetch_name}")
+        wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls=set(
+                resolve_transformer_layer_classes(
+                    str(model_family).lower()
+                )
+            ),
+        )
+        return FSDPStrategy(
+            auto_wrap_policy=wrap_policy,
+            cpu_offload=False,
+            mixed_precision=MixedPrecision(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+                buffer_dtype=torch.bfloat16
+            ),
+            sharding_strategy=fsdp_cfg.get('sharding_strategy', 'FULL_SHARD'),
+            backward_prefetch=getattr(BackwardPrefetch, backward_prefetch_name),
+            state_dict_type=fsdp_cfg.get("state_dict_type", "full"),
+            limit_all_gathers=bool(fsdp_cfg.get("limit_all_gathers", True)),
+        )
+
+    if strategy_name in ("auto", "none"):
+        return "auto"
+
+    raise ValueError(f"Unsupported distributed_strategy={strategy_name} (expected ddp/fsdp/auto)")
+
+
 if __name__ == "__main__":
     # Arguments
     parser = argparse.ArgumentParser()
@@ -195,42 +242,8 @@ if __name__ == "__main__":
         **val_loader_kwargs,
     )    
 
-    # Distributed strategy
-    wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls=set(
-            resolve_transformer_layer_classes(
-                detect_model_family(config['model']['pretrained_model_path'])
-            )
-        ),
-    )
-    strategy_name = str(training_cfg.get("distributed_strategy", "fsdp")).lower()
-    if strategy_name == "ddp":
-        strategy = DDPStrategy(
-            find_unused_parameters=bool(training_cfg.get("ddp_find_unused_parameters", False))
-        )
-    elif strategy_name == "fsdp":
-        fsdp_cfg = training_cfg.get("fsdp", {})
-        backward_prefetch_name = str(fsdp_cfg.get("backward_prefetch", "BACKWARD_PRE")).upper()
-        if not hasattr(BackwardPrefetch, backward_prefetch_name):
-            raise ValueError(f"Unknown FSDP backward_prefetch={backward_prefetch_name}")
-        strategy = FSDPStrategy(
-            auto_wrap_policy=wrap_policy,
-            cpu_offload=False,
-            mixed_precision=MixedPrecision(
-                param_dtype=torch.bfloat16,
-                reduce_dtype=torch.bfloat16,
-                buffer_dtype=torch.bfloat16
-            ),
-            sharding_strategy=fsdp_cfg.get('sharding_strategy', 'FULL_SHARD'),
-            backward_prefetch=getattr(BackwardPrefetch, backward_prefetch_name),
-            state_dict_type=fsdp_cfg.get("state_dict_type", "full"),
-            limit_all_gathers=bool(fsdp_cfg.get("limit_all_gathers", True)),
-        )
-    elif strategy_name in ("auto", "none"):
-        strategy = "auto"
-    else:
-        raise ValueError(f"Unsupported distributed_strategy={strategy_name} (expected ddp/fsdp/auto)")
+    model_family = detect_model_family(config['model']['pretrained_model_path'])
+    strategy = build_training_strategy(training_cfg, model_family)
 
     current_date = os.environ.get("SFT_RUN_TS", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     save_dir = f"runs/sft/{current_date}"

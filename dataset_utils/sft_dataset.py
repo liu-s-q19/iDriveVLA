@@ -14,6 +14,15 @@ from nuplan.planning.simulation.trajectory.trajectory_sampling import Trajectory
 
 IGNORE_INDEX = -100
 
+
+def build_sft_chat_text(processor, messages, add_vision_id=False):
+    return processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        add_vision_id=add_vision_id,
+    )
+
 class SFTDataset(Dataset):
     def __init__(self, data_config, model_config, processor, using_cot=True):
         data_paths = data_config['json_dataset_path']
@@ -331,15 +340,11 @@ class SFTDataset(Dataset):
             for item in user_content:
                 if item.get("type") == "video":
                     image_paths.extend(item.get("video", []))
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            text = build_sft_chat_text(self.processor, messages)
             inputs = {'text': text, 'image_paths': image_paths}
         else:
             image_inputs, video_inputs = process_vision_info(messages)
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
-            )
+            text = build_sft_chat_text(self.processor, messages, add_vision_id=True)
             inputs = {'text': text, 'image_inputs': image_inputs, 'video_inputs': video_inputs}
 
         # trajectory information

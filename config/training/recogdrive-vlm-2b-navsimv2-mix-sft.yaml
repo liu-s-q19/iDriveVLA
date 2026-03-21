@@ -1,0 +1,89 @@
+name: recogdrive-vlm-2b-navsimv2-mix-sft
+description: ReCogDrive-VLM-2B SFT on NavSim v2 canonical 8-pose; standard single-node training profile
+
+model:
+  family: internvl_chat
+  use_cot: false
+  pretrained_model_path: /data/ckpt/ReCogDrive-VLM-2B
+  train_vision_backbone: false
+  train_lm_backbone: true
+  lora:
+    use: false
+    task_type: CAUSAL_LM
+    target_modules: [q_proj, v_proj, k_proj, o_proj]
+    r: 8
+    alpha: 8
+    dropout: 0.1
+    bias: none
+  codebook_cache_path: "codebook_cache/agent_vocab.pkl"
+  action_answer_protocol:
+    enabled: false
+  trajectory:
+    num_poses: 8
+    interval_length: 0.5
+    time_horizon: 4.0
+  tokens:
+    action_start_id: 151682
+    ignore_index: -100
+    assistant_id: [151644, 77091, 198]
+  video:
+    min_pixels: 109760
+    max_pixels: 109760
+
+training:
+  batch_size: 1
+  num_nodes: 1
+  devices: auto
+  log_every_n_steps: 10
+  enable_progress_bar: true
+  progress_bar_refresh_rate: 10
+  logging:
+    type: tensorboard
+  distributed_strategy: ddp
+  ddp_find_unused_parameters: true
+  gradient_checkpointing: false
+  learning_rate: 2.0e-5
+  action_loss_weight: 2.0
+  cot_sample_loss_multiplier: 1.0
+  generated_action_probe:
+    enabled: true
+    every_n_steps: 400
+    max_new_tokens: 2048
+    do_sample: true
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+  epochs: 5
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  weight_decay: 0.01
+  lr_warmup_step: 500
+  lr_step_frequency: 2000
+  lr_step_gamma: 0.98
+  train_sample_size: null
+  accumulate_grad_batches: 4
+
+data:
+  train:
+    json_dataset_path:
+      - /data/dataset/navsim/preprocessed/navtrainval_nocot
+    sensor_data_path:
+      - /data/dataset/navsim
+
+  val:
+    json_dataset_path: /data/dataset/navsim/preprocessed/navtest_nocot
+    sensor_data_path: /data/dataset/navsim
+
+inference:
+  batch_size: 1
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  sample:
+    max_length: 2048
+    temperature: 0.2
+    top_k: 20
+    top_p: 1.0

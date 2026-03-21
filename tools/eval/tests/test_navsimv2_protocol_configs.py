@@ -30,7 +30,7 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("training/qwen2.5-vl-3B-navsimv2-mix-sft-local8gpu", run_sft)
+        self.assertIn("training/qwen2.5-vl-3B-navsimv2-mix-sft", run_sft)
         self.assertIn("training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format", run_rft)
         self.assertIn("config/eval/navsimv2_epdms_standard_autovla_qwen_sft8_retry3_epoch4.yaml", navtest)
         self.assertIn("config/eval/navhard_two_stage_autovla_qwen_sft8_retry3_epoch4.yaml", navhard)
@@ -57,6 +57,27 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
         self.assertEqual(cfg["model"]["trajectory"]["num_poses"], 8)
         self.assertEqual(cfg["model"]["trajectory"]["interval_length"], 0.5)
         self.assertEqual(cfg["model"]["trajectory"]["time_horizon"], 4.0)
+
+    def test_recogdrive_standard_sft_config_matches_standard_worker_settings(self):
+        cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-mix-sft.yaml")
+        self.assertEqual(cfg["training"]["distributed_strategy"], "ddp")
+        self.assertTrue(cfg["training"]["ddp_find_unused_parameters"])
+        self.assertFalse(cfg["training"]["gradient_checkpointing"])
+        self.assertEqual(cfg["training"]["batch_size"], 1)
+        self.assertEqual(cfg["training"]["accumulate_grad_batches"], 4)
+        self.assertEqual(cfg["training"]["num_workers"], 4)
+        self.assertTrue(cfg["training"]["persistent_workers"])
+        self.assertEqual(cfg["training"]["prefetch_factor"], 2)
+        self.assertEqual(cfg["inference"]["num_workers"], 2)
+        self.assertTrue(cfg["inference"]["persistent_workers"])
+        self.assertEqual(cfg["inference"]["prefetch_factor"], 2)
+
+    def test_dedicated_sft_launchers_default_to_standard_configs(self):
+        qwen = (REPO_ROOT / "scripts" / "run_sft_qwen_local8gpu.sh").read_text(encoding="utf-8")
+        recog = (REPO_ROOT / "scripts" / "run_sft_recogdrive_vlm2b_local8gpu.sh").read_text(encoding="utf-8")
+
+        self.assertIn("training/qwen2.5-vl-3B-navsimv2-mix-sft", qwen)
+        self.assertIn("training/recogdrive-vlm-2b-navsimv2-mix-sft", recog)
 
     def test_rft_default_and_answer_configs_share_canonical_trajectory(self):
         default_cfg = _load_yaml("config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format.yaml")

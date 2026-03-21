@@ -3,7 +3,7 @@ set -euo pipefail
 
 CONDA_ENV="${CONDA_ENV:-autolsqv2}"
 PYTHON_BIN="${PYTHON_BIN:-/data/miniconda/envs/${CONDA_ENV}/bin/python}"
-SFT_CONFIG="${SFT_CONFIG:-training/qwen2.5-vl-3B-navsimv2-mix-sft-local8gpu}"
+SFT_CONFIG="${SFT_CONFIG:-training/qwen2.5-vl-3B-navsimv2-mix-sft}"
 
 export NAVSIM_DEVKIT_ROOT=/data/liushiqi/navsim
 export NAVSIM_DATA_ROOT=/data/dataset/navsim
