@@ -544,7 +544,10 @@ class GRPOAutoVLA(pl.LightningModule):
 
             prompt_length = get_input_ids_tensor(inputs).size(1)
             prompt_mask = model_inputs['attention_mask']
-            completion_ids = prompt_completion_ids[:, prompt_length:]
+            completion_ids = extract_completion_ids_from_generate_output(
+                prompt_completion_ids,
+                get_input_ids_tensor(inputs),
+            )
 
             # Extract action tokens and trajectory (! batch size = 1)
             raw_action_candidates = completion_ids[0][completion_ids[0] >= self.action_start_id]
