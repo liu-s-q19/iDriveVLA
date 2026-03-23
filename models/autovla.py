@@ -577,7 +577,8 @@ class GRPOAutoVLA(pl.LightningModule):
             raw_action_len = int(global_action_tokens.numel())
 
             if self._action_answer_protocol_enabled:
-                parse_result = self._parse_action_answer_completion(completion_ids[0], model.processor.tokenizer)
+                protocol_completion_ids = model._augment_completion_for_protocol(completion_ids[0])
+                parse_result = self._parse_action_answer_completion(protocol_completion_ids, model.processor.tokenizer)
                 if parse_result.is_valid:
                     actions_tokens = self._action_tokens_tensor(parse_result.action_token_ids, device=device)
                 else:
@@ -1005,13 +1006,23 @@ class AutoVLA(torch.nn.Module):
         model_path = config['model']['pretrained_model_path']
         self.model_family = detect_model_family(model_path)
         self.vlm = load_causal_lm_for_model(model_path, device=device)
-        self.processor = load_processor_for_model(model_path)
+        self.processor = load_processor_for_model(model_path, model_config=config.get('model', {}))
         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer, 
                                                 model_config=config['model'])
         resize_token_embeddings_for_model(self.vlm, len(self.processor.tokenizer))
         initialize_model_runtime_state(self.vlm, self.processor)
 
         self.video_conf = config['model']['video']
+        prompt_conf = config.get('model', {}).get('prompt', {})
+        self._force_action_answer_prefix = bool(prompt_conf.get('force_action_answer_prefix', False))
+        self._answer_prefix_text = "<answer>\nThe final output trajectory is: "
+        if self._force_action_answer_prefix:
+            self._answer_prefix_token_ids = self.processor.tokenizer.encode(
+                self._answer_prefix_text,
+                add_special_tokens=False,
+            )
+        else:
+            self._answer_prefix_token_ids = []
         self.action_start_id = config['model']['tokens']['action_start_id']
         self._trajectory_num_poses = int(config['model']['trajectory']['num_poses'])
         self._action_answer_protocol_enabled = bool(
@@ -1045,8 +1056,9 @@ class AutoVLA(torch.nn.Module):
 
     def _build_qwen_inputs(self, messages):
         image_inputs, video_inputs = process_vision_info(messages)
+        add_generation_prompt = not (messages and messages[-1].get("role") == "assistant")
         text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, add_vision_id=True
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt, add_vision_id=True
         )
         return self.processor(
             text=[text],
@@ -1066,8 +1078,9 @@ class AutoVLA(torch.nn.Module):
                     image_paths.extend(item.get("video", []))
                 elif item.get("type") == "image":
                     image_paths.append(item.get("image"))
+        add_generation_prompt = not (messages and messages[-1].get("role") == "assistant")
         text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
         )
         return self.processor.build_batch(
             text=[text],
@@ -1083,6 +1096,14 @@ class AutoVLA(torch.nn.Module):
             action_start_id=self.action_start_id,
             expected_action_len=self._trajectory_num_poses,
         )
+
+    def _augment_completion_for_protocol(self, completion_ids: torch.Tensor) -> torch.Tensor:
+        if (not self._action_answer_protocol_enabled) or (not self._force_action_answer_prefix):
+            return completion_ids
+        if not self._answer_prefix_token_ids:
+            return completion_ids
+        prefix = torch.tensor(self._answer_prefix_token_ids, dtype=completion_ids.dtype, device=completion_ids.device)
+        return torch.cat([prefix, completion_ids], dim=0)
 
     def _set_last_protocol_result(self, parse_result=None) -> None:
         if parse_result is None:
@@ -1150,7 +1171,8 @@ class AutoVLA(torch.nn.Module):
         generated_action_tokens = outputs_trimmed[outputs_trimmed >= self.action_start_id]
         cot_results = self.processor.decode(outputs_trimmed)
         if self._action_answer_protocol_enabled:
-            parse_result = self._parse_action_answer_completion(outputs_trimmed)
+            protocol_completion_ids = self._augment_completion_for_protocol(outputs_trimmed)
+            parse_result = self._parse_action_answer_completion(protocol_completion_ids)
             self._set_last_protocol_result(parse_result)
             if parse_result.is_valid:
                 trajectory = self._decode_protocol_trajectory(parse_result.action_token_ids)
@@ -1282,7 +1304,7 @@ class AutoVLA(torch.nn.Module):
                 "type": "text",
                 "text": (
                     f"The current velocity of the vehicle is {velocity:.3f} m/s, and the current acceleration is {acceleration:.3f} m/s². "
-                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next four seconds."
+                    f"The driving instruction is: {instruction}. Based on this information, plan the future trajectory for the autonomous vehicle over the next four seconds."
                 )
             },
         ]
@@ -1297,18 +1319,16 @@ class AutoVLA(torch.nn.Module):
                             "text":
                             "You are an Advanced Driver Assistance and Full Self-Driving System. "
                             "You will receive visual observations from the ego vehicle’s cameras and dynamic information about the vehicle’s current state. "
-                            "Your task is to predict the optimal driving action for the next four seconds.\n\n"
+                            "Your task is to predict the future trajectory for the next four seconds (8 poses).\n\n"
                             "First, carefully analyze the surrounding environment by considering traffic lights, the movements of other vehicles and pedestrians, lane markings, and any other relevant factors.\n\n"
-                            "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving action. Otherwise, you may directly predict the final driving action.\n\n"
+                            "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving trajectory. Otherwise, you may directly predict the final trajectory.\n\n"
                             "Structure your reasoning as follows:\n"
                             "1. **Scene Analysis**: Describe the traffic situation, including relevant environmental cues such as traffic lights, lane markings, and the behaviors of surrounding vehicles or pedestrians.\n"
                             "2. **Identification of Critical Objects**: Identify two to three critical road users or obstacles, specifying their relative positions to the ego vehicle.\n"
                             "3. **Prediction of Critical Object Behavior**: Predict the potential movements of the identified critical objects.\n"
                             "4. **Ego Vehicle Intent Reasoning**: Based on the observed environment and current vehicle state, reason about the desired intent of the ego vehicle.\n"
-                            "5. **Final Action Decision**: Select one lateral action and one longitudinal action:\n"
-                            "- **Lateral actions** (choose exactly one): [move forward, turn left, change lane to left, turn right, change lane to right]\n"
-                            "- **Longitudinal actions** (choose exactly one): [stop, deceleration to zero, maintain constant speed, quick deceleration, deceleration, quick acceleration, acceleration]\n\n"
-                            "Present the final action clearly after your reasoning steps."
+                            "5. **Final Trajectory Decision**: Output the final trajectory token sequence for 8 poses.\n\n"
+                            "Present the final trajectory token sequence clearly after your reasoning steps."
                         }
                     ]
                 },
@@ -1330,7 +1350,7 @@ class AutoVLA(torch.nn.Module):
                             "text":
                             "You are an Advanced Driver Assistance and Full Self-Driving System. "
                             "You will be provided with video observations from the ego vehicle’s surrounding cameras, along with the vehicle’s current dynamic states. "
-                            "Your task is to predict the most appropriate driving action for the next four seconds."
+                            "Your task is to predict the future trajectory for the next four seconds (8 poses)."
                         }
                     ]
                 },
@@ -1339,6 +1359,19 @@ class AutoVLA(torch.nn.Module):
                     "content": user_content
                 },
             ]
+
+        if self._force_action_answer_prefix:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "<answer>\nThe final output trajectory is: ",
+                        }
+                    ],
+                }
+            )
 
         if self.model_family == "internvl_chat":
             return self._build_internvl_inputs(messages)

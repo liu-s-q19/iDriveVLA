@@ -63,7 +63,7 @@ def main():
     config = load_config(args.config)
     
     # Initialize processor
-    processor = load_processor_for_model(config['model']['pretrained_model_path'])
+    processor = load_processor_for_model(config['model']['pretrained_model_path'], model_config=config.get('model', {}))
     
     # Build data config for SFTDataset from config
     

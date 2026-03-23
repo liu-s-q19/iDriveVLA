@@ -153,7 +153,7 @@ if __name__ == "__main__":
     )
 
     # Model, dataset, and dataloader
-    processor = load_processor_for_model(config['model']['pretrained_model_path'])
+    processor = load_processor_for_model(config['model']['pretrained_model_path'], model_config=config.get('model', {}))
     
     # Get using_cot setting from config (default to True if not specified)
     using_cot = config['model']['use_cot']
@@ -190,6 +190,25 @@ if __name__ == "__main__":
 
     if hasattr(model.autovla.vlm, "config") and hasattr(model.autovla.vlm.config, "use_cache"):
         model.autovla.vlm.config.use_cache = not use_gradient_checkpointing
+
+    torch_compile_cfg = training_cfg.get("torch_compile", {})
+    if bool(torch_compile_cfg.get("enabled", False)):
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("training.torch_compile.enabled=true but torch.compile is unavailable")
+        compile_kwargs = {
+            "fullgraph": bool(torch_compile_cfg.get("fullgraph", False)),
+        }
+        mode = torch_compile_cfg.get("mode", "reduce-overhead")
+        backend = torch_compile_cfg.get("backend", "inductor")
+        dynamic = torch_compile_cfg.get("dynamic")
+        if mode is not None:
+            compile_kwargs["mode"] = str(mode)
+        if backend is not None:
+            compile_kwargs["backend"] = str(backend)
+        if dynamic is not None:
+            compile_kwargs["dynamic"] = bool(dynamic)
+        print(f"Enabling torch.compile for SFT model with kwargs={compile_kwargs}")
+        model.autovla.vlm = torch.compile(model.autovla.vlm, **compile_kwargs)
 
     # checkpoint_path = Path(".ckpt")
     # state_dict = torch.load(checkpoint_path)['state_dict']

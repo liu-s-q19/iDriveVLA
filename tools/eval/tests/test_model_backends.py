@@ -120,6 +120,35 @@ class TestModelBackends(unittest.TestCase):
         )
         auto_loader.assert_not_called()
 
+    def test_load_processor_for_internvl_uses_configured_image_size(self):
+        from models.utils import model_backends
+
+        with patch.object(model_backends, "detect_model_family", return_value="internvl_chat"), patch.object(
+            model_backends,
+            "InternVLProcessorAdapter",
+            return_value="internvl-processor",
+        ) as adapter:
+            processor = model_backends.load_processor_for_model(
+                "/fake/recogdrive",
+                model_config={"internvl": {"image_size": 560}},
+            )
+
+        self.assertEqual(processor, "internvl-processor")
+        adapter.assert_called_once_with(model_path="/fake/recogdrive", image_size=560)
+
+    def test_load_processor_for_internvl_defaults_to_448_when_config_missing(self):
+        from models.utils import model_backends
+
+        with patch.object(model_backends, "detect_model_family", return_value="internvl_chat"), patch.object(
+            model_backends,
+            "InternVLProcessorAdapter",
+            return_value="internvl-processor",
+        ) as adapter:
+            processor = model_backends.load_processor_for_model("/fake/recogdrive", model_config={})
+
+        self.assertEqual(processor, "internvl-processor")
+        adapter.assert_called_once_with(model_path="/fake/recogdrive", image_size=448)
+
     def test_load_causal_lm_for_model_uses_auto_model_for_internvl(self):
         from models.utils import model_backends
 

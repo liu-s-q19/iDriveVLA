@@ -18,6 +18,7 @@ class FakeTokenizer:
             4: " ",
             5: "\n",
             6: "tail text",
+            7: "The final output trajectory is: ",
             101: "<action_0>",
             102: "<action_1>",
             103: "<action_2>",
@@ -57,6 +58,19 @@ class TestActionAnswerProtocol(unittest.TestCase):
         self.assertTrue(result.answer_block_at_tail)
         self.assertEqual(result.action_token_ids, [101, 102, 103, 104, 105, 106, 107, 108])
         self.assertEqual(result.action_token_count, 8)
+
+    def test_parse_does_not_depend_on_action_keyword(self):
+        completion_ids = torch.tensor([1, 7, 101, 102, 103, 104, 105, 106, 107, 108, 2])
+
+        result = parse_action_answer_completion(
+            completion_ids,
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=self.expected_action_len,
+        )
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.action_token_ids, [101, 102, 103, 104, 105, 106, 107, 108])
 
     def test_parse_rejects_missing_answer_block(self):
         result = parse_action_answer_completion(

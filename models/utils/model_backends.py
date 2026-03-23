@@ -4,7 +4,7 @@ import builtins
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -53,14 +53,16 @@ def infer_internvl_num_image_token(model_path: str) -> int:
     return int((image_size // patch_size) ** 2 * (cfg.downsample_ratio ** 2))
 
 
-def load_processor_for_model(model_path: str):
+def load_processor_for_model(model_path: str, model_config: Optional[Dict[str, Any]] = None):
     family = detect_model_family(model_path)
     if family == "qwen2_5_vl":
         processor = AutoProcessor.from_pretrained(model_path, use_fast=True)
         processor.family = family
         return processor
     if family == "internvl_chat":
-        return InternVLProcessorAdapter(model_path=model_path)
+        internvl_conf = (model_config or {}).get("internvl", {})
+        image_size = int(internvl_conf.get("image_size", 448))
+        return InternVLProcessorAdapter(model_path=model_path, image_size=image_size)
     raise ValueError(f"Unsupported model family for processor loading: {family}")
 
 
@@ -412,11 +414,11 @@ def _flatten_message_content_for_internvl(content: Iterable[dict]) -> str:
 class InternVLProcessorAdapter:
     family = "internvl_chat"
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, image_size: int = 448):
         self.model_path = model_path
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.num_image_token = infer_internvl_num_image_token(model_path)
-        self.image_size = 448
+        self.image_size = int(image_size)
         self.img_context_token = "<IMG_CONTEXT>"
         self.img_start_token = "<img>"
         self.img_end_token = "</img>"

@@ -52,6 +52,9 @@ class SFTDataset(Dataset):
         self.action_tokenizer = ActionTokenizer(self.processor.tokenizer, model_config=model_config)
         # Flag to control whether to use CoT in training data
         self.using_cot = using_cot
+        video_conf = model_config.get('video', {})
+        self.video_min_pixels = int(video_conf.get('min_pixels', 109760))
+        self.video_max_pixels = int(video_conf.get('max_pixels', 109760))
         
         trajectory_sampling = TrajectorySampling(time_horizon=model_config['trajectory']['time_horizon'], 
                                                 interval_length=model_config['trajectory']['interval_length'])
@@ -148,7 +151,7 @@ class SFTDataset(Dataset):
                     "type": "text",
                     "text": (
                         "<answer>\n"
-                        "The final output action is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
+                        "The final output trajectory is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
                         "</answer>"
                     )
                 }
@@ -159,7 +162,7 @@ class SFTDataset(Dataset):
                     "text": (
                         "You are an Advanced Driver Assistance and Full Self-Driving System. "
                         "You will be provided with video observations from the ego vehicle's surrounding cameras, along with the vehicle's current dynamic states. "
-                        "Your task is to predict the most appropriate driving action for the next four seconds."
+                        "Your task is to predict the future trajectory for the next four seconds (8 poses)."
                     )
                 }
             ]
@@ -172,10 +175,10 @@ class SFTDataset(Dataset):
                     "text": (
                         "You are an Advanced Driver Assistance and Full Self-Driving System. "
                         "You will receive visual observations from the ego vehicle's cameras and dynamic information about the vehicle's current state. "
-                        "Your task is to predict the optimal driving action for the next four seconds.\n\n"
+                        "Your task is to predict the future trajectory for the next four seconds (8 poses).\n\n"
                         "First, carefully analyze the surrounding environment by considering traffic lights, the movements of other vehicles and pedestrians, lane markings, and any other relevant factors.\n\n"
-                        "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving action. Otherwise, you may directly predict the final driving action.\n\n"
-                        "Present the final action clearly after your reasoning steps."
+                        "If necessary, use step-by-step reasoning (Chain-of-Thought) to arrive at the best driving trajectory. Otherwise, you may directly predict the final trajectory.\n\n"
+                        "Present the final trajectory token sequence clearly after your reasoning steps."
                     )
                 }
             ]
@@ -193,7 +196,7 @@ class SFTDataset(Dataset):
                                 f"{gt_cot}\n"
                                 "</think>\n"
                                 "<answer>\n"
-                                "The final output action is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
+                                "The final output trajectory is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
                                 "</answer>"
                             )
                         }
@@ -208,7 +211,7 @@ class SFTDataset(Dataset):
                                 "This is a straightforward scenario, and a direct decision can be made.\n"
                                 "</think>\n"
                                 "<answer>\n"
-                                "The final output action is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
+                                "The final output trajectory is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
                                 "</answer>"
                             )
                         }
@@ -227,15 +230,15 @@ class SFTDataset(Dataset):
                                 f"### Scene Description:\n{gt_cot[0]}\n\n" 
                                 f"### Critical Object Description:\n{gt_cot[1] + gt_cot[2]}\n\n" 
                                 f"### Reasoning on Intent:\n{gt_cot[3]}\n\n"
-                                f"### Best Driving Action:\n{gt_cot[4]}\n" 
+                                f"### Best Driving Trajectory:\n{gt_cot[4]}\n" 
                                 "</think>\n"
                                 "<answer>\n"
-                                "The final output action is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
+                                "The final output trajectory is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
                                 "</answer>"
                         }
                     ]
                     has_cot = True
-                else:  # Only return the final action
+                else:  # Only return the final trajectory
                     assistant_content = [
                         {
                             "type": "text",
@@ -244,7 +247,7 @@ class SFTDataset(Dataset):
                                 "This is a straightforward scenario, and a direct decision can be made.\n"
                                 "</think>\n"
                                 "<answer>\n"
-                                "The final output action is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
+                                "The final output trajectory is: " + self.action_tokenizer(gt_action_idx[0]) + "\n"
                                 "</answer>"
                             )
                         }
@@ -267,8 +270,8 @@ class SFTDataset(Dataset):
             },
             {
                 "type": "video",
-                "min_pixels": 28 * 28 * 128,
-                "max_pixels": 28 * 28 * 128,
+                "min_pixels": self.video_min_pixels,
+                "max_pixels": self.video_max_pixels,
                 "video": [
                     f"file://{front_camera_1}",
                     f"file://{front_camera_2}",
@@ -282,8 +285,8 @@ class SFTDataset(Dataset):
             },
             {
                 "type": "video",
-                "min_pixels": 28 * 28 * 128,
-                "max_pixels": 28 * 28 * 128,
+                "min_pixels": self.video_min_pixels,
+                "max_pixels": self.video_max_pixels,
                 "video": [
                     f"file://{front_left_camera_1}",
                     f"file://{front_left_camera_2}",
@@ -297,8 +300,8 @@ class SFTDataset(Dataset):
             },
             {
                 "type": "video",
-                "min_pixels": 28 * 28 * 128,
-                "max_pixels": 28 * 28 * 128,
+                "min_pixels": self.video_min_pixels,
+                "max_pixels": self.video_max_pixels,
                 "video": [
                     f"file://{front_right_camera_1}",
                     f"file://{front_right_camera_2}",
@@ -310,7 +313,7 @@ class SFTDataset(Dataset):
                 "type": "text",
                 "text": (
                     f"The current velocity of the vehicle is {velocity:.3f} m/s, and the current acceleration is {acceleration:.3f} m/s². "
-                    f"The driving instruction is: {instruction}. Based on this information, plan the action trajectory for the autonomous vehicle over the next four seconds."
+                    f"The driving instruction is: {instruction}. Based on this information, plan the future trajectory for the autonomous vehicle over the next four seconds."
                 )
             },
         ]
