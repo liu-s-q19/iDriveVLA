@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from tools.eval import navtest_epdms_sharded as shard_mod
 from tools.eval import run_navsimv2_epdms_standard as standard_mod
@@ -23,6 +24,12 @@ def main() -> None:
     parser.add_argument("--num-shards", type=int, default=8, help="Number of shards / GPUs.")
     parser.add_argument("--plan-dir", type=str, default=None, help="Optional output directory for shard manifests.")
     parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        help="Top-level OmegaConf dotlist override, e.g. model.checkpoint_path=/path/to/ckpt",
+    )
+    parser.add_argument(
         "--override",
         action="append",
         default=[],
@@ -32,6 +39,11 @@ def main() -> None:
 
     cfg_path = standard_mod._resolve_config_path(args.config)
     cfg = standard_mod._load_yaml(cfg_path)
+    if args.set:
+        merged_cfg = OmegaConf.merge(OmegaConf.create(cfg), OmegaConf.from_dotlist(args.set))
+        cfg = OmegaConf.to_container(merged_cfg, resolve=True)
+        if not isinstance(cfg, dict):
+            raise ValueError("--set produced non-mapping top-level config.")
     standard_mod._validate_top_level_config(cfg)
     standard_mod._apply_process_env(cfg)
 
@@ -79,9 +91,11 @@ def main() -> None:
     manifests_dir = plan_dir / "manifests"
     partials_dir = plan_dir / "partials"
     merged_dir = plan_dir / "merged"
+    resolved_cfg_path = plan_dir / "resolved_config.yaml"
     manifests_dir.mkdir(parents=True, exist_ok=True)
     partials_dir.mkdir(parents=True, exist_ok=True)
     merged_dir.mkdir(parents=True, exist_ok=True)
+    resolved_cfg_path.write_text(OmegaConf.to_yaml(OmegaConf.create(cfg)), encoding="utf-8")
 
     manifest_paths = []
     for shard_index, shard_tokens in enumerate(shards):
@@ -92,7 +106,7 @@ def main() -> None:
             "num_shards": int(args.num_shards),
             "tokens": shard_tokens,
             "partial_dir": str(shard_dir),
-            "config_path": str(cfg_path),
+            "config_path": str(resolved_cfg_path),
             "base_overrides": base_overrides,
             "navsim_root": str(navsim_root),
         }
@@ -107,6 +121,8 @@ def main() -> None:
         "merged_dir": str(merged_dir),
         "num_shards": int(args.num_shards),
         "config_path": str(cfg_path),
+        "resolved_config_path": str(resolved_cfg_path),
+        "set_overrides": list(args.set),
         "base_overrides": base_overrides,
         "num_tokens": len(tokens),
         "manifest_paths": manifest_paths,

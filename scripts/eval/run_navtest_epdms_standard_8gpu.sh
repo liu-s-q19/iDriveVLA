@@ -7,6 +7,7 @@ CONFIG_PATH="${CONFIG_PATH:-$ROOT_DIR/config/eval/navsimv2_epdms_standard_autovl
 NUM_SHARDS="${NUM_SHARDS:-8}"
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 PLAN_DIR="${PLAN_DIR:-}"
+CKPT_PATH="${CKPT_PATH:-}"
 NUPLAN_MAPS_ROOT="${NUPLAN_MAPS_ROOT:-/data/dataset/navsim/maps}"
 OPENSCENE_DATA_ROOT="${OPENSCENE_DATA_ROOT:-/data/dataset/navsim}"
 NUPLAN_MAP_VERSION="${NUPLAN_MAP_VERSION:-nuplan-maps-v1.0}"
@@ -30,6 +31,9 @@ PREP_CMD=(
 )
 if [[ -n "$PLAN_DIR" ]]; then
   PREP_CMD+=(--plan-dir "$PLAN_DIR")
+fi
+if [[ -n "$CKPT_PATH" ]]; then
+  PREP_CMD+=(--set "model.checkpoint_path=$CKPT_PATH")
 fi
 if [[ "$#" -gt 0 ]]; then
   PREP_CMD+=("$@")
