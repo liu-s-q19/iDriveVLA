@@ -4,7 +4,7 @@ set -euo pipefail
 CONDA_ENV="${CONDA_ENV:-autolsqv2}"
 PYTHON_BIN="${PYTHON_BIN:-/data/miniconda/envs/${CONDA_ENV}/bin/python}"
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
-RFT_CONFIG="${RFT_CONFIG:-training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format}"
+RFT_CONFIG="${RFT_CONFIG:-training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-answer-format}"
 
 export NAVSIM_DEVKIT_ROOT=/data/liushiqi/navsim
 export NAVSIM_DATA_ROOT=/data/dataset/navsim

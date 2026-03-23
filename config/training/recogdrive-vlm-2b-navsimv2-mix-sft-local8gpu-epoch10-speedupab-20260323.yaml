@@ -1,14 +1,14 @@
-name: recogdrive-vlm-8b-navsimv2-mix-sft-local8gpu
-description: ReCogDrive-VLM-8B SFT on NavSim v2 canonical 8-pose; local/remote single-node 8-GPU launcher variant
+name: recogdrive-vlm-2b-navsimv2-mix-sft-local8gpu-epoch10-speedupab-20260323
+description: ReCogDrive-VLM-2B SFT on NavSim v2 canonical 8-pose; local/remote single-node 8-GPU launcher variant
 
 model:
   family: internvl_chat
   use_cot: false
-  pretrained_model_path: /data/ckpt/ReCogDrive-VLM-8B
+  pretrained_model_path: /data/ckpt/ReCogDrive-VLM-2B
   train_vision_backbone: false
   train_lm_backbone: true
   lora:
-    use: true
+    use: false
     task_type: CAUSAL_LM
     target_modules: [q_proj, v_proj, k_proj, o_proj]
     r: 8
@@ -33,7 +33,7 @@ model:
     image_size: 448
 
 training:
-  batch_size: 1
+  batch_size: 2
   num_nodes: 1
   devices: auto
   log_every_n_steps: 10
@@ -43,7 +43,7 @@ training:
     type: tensorboard
   distributed_strategy: ddp
   ddp_find_unused_parameters: true
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   learning_rate: 2.0e-5
   action_loss_weight: 2.0
   cot_sample_loss_multiplier: 1.0
@@ -55,17 +55,17 @@ training:
     temperature: 1.0
     top_k: 0
     top_p: 1.0
-  epochs: 5
-  num_workers: 0
+  epochs: 10
+  num_workers: 8
   pin_memory: true
-  persistent_workers: false
-  prefetch_factor: null
+  persistent_workers: true
+  prefetch_factor: 4
   weight_decay: 0.01
   lr_warmup_step: 500
   lr_step_frequency: 2000
   lr_step_gamma: 0.98
   train_sample_size: null
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 2
 
 data:
   train:
@@ -80,10 +80,10 @@ data:
 
 inference:
   batch_size: 1
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
-  persistent_workers: false
-  prefetch_factor: null
+  persistent_workers: true
+  prefetch_factor: 2
   sample:
     max_length: 2048
     temperature: 0.2

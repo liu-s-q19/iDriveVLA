@@ -25,13 +25,15 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
     def test_primary_launchers_default_to_canonical_qwen_entries(self):
         run_sft = (REPO_ROOT / "scripts" / "run_sft.sh").read_text(encoding="utf-8")
         run_rft = (REPO_ROOT / "scripts" / "run_rft.sh").read_text(encoding="utf-8")
+        run_rft_recog = (REPO_ROOT / "scripts" / "run_rft_recogdrive_vlm2b.sh").read_text(encoding="utf-8")
         navtest = (REPO_ROOT / "scripts" / "eval" / "run_navtest_epdms_standard_8gpu.sh").read_text(encoding="utf-8")
         navhard = (REPO_ROOT / "scripts" / "eval" / "run_navhard_two_stage_autovla_current_8gpu.sh").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("training/qwen2.5-vl-3B-navsimv2-mix-sft", run_sft)
-        self.assertIn("training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format", run_rft)
+        self.assertIn("training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-answer-format", run_rft)
+        self.assertIn("training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-answer-format", run_rft_recog)
         self.assertIn("config/eval/navsimv2_epdms_standard_autovla_qwen_sft8_retry3_epoch4.yaml", navtest)
         self.assertIn("config/eval/navhard_two_stage_autovla_qwen_sft8_retry3_epoch4.yaml", navhard)
 
@@ -71,6 +73,14 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
         self.assertEqual(cfg["inference"]["num_workers"], 2)
         self.assertTrue(cfg["inference"]["persistent_workers"])
         self.assertEqual(cfg["inference"]["prefetch_factor"], 2)
+        self.assertEqual(cfg["model"]["internvl"]["image_size"], 448)
+
+    def test_recogdrive_rft_configs_expose_explicit_internvl_resize(self):
+        answer_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-answer-format.yaml")
+        default_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-default-format.yaml")
+
+        self.assertEqual(answer_cfg["model"]["internvl"]["image_size"], 448)
+        self.assertEqual(default_cfg["model"]["internvl"]["image_size"], 448)
 
     def test_dedicated_sft_launchers_default_to_standard_configs(self):
         qwen = (REPO_ROOT / "scripts" / "run_sft_qwen_local8gpu.sh").read_text(encoding="utf-8")
@@ -87,6 +97,14 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
         self.assertEqual(answer_cfg["model"]["trajectory"]["num_poses"], 8)
         self.assertFalse(default_cfg["model"]["action_answer_protocol"]["enabled"])
         self.assertTrue(answer_cfg["model"]["action_answer_protocol"]["enabled"])
+        self.assertTrue(answer_cfg["model"]["prompt"]["force_action_answer_prefix"])
+
+    def test_recogdrive_answer_format_defaults_force_answer_prefix(self):
+        answer_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-answer-format.yaml")
+        smoke_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260322-ip190-answer-format-smoke.yaml")
+
+        self.assertTrue(answer_cfg["model"]["prompt"]["force_action_answer_prefix"])
+        self.assertTrue(smoke_cfg["model"]["prompt"]["force_action_answer_prefix"])
 
     def test_rft_eval_templates_explicitly_enable_lora(self):
         navtest_cfg = _load_yaml("config/eval/navsimv2_epdms_standard_autovla_rft_answer_format.yaml")

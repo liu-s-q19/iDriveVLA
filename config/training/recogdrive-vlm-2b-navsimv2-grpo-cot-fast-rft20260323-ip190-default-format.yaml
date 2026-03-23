@@ -31,6 +31,8 @@ model:
   video:
     min_pixels: 109760
     max_pixels: 109760
+  internvl:
+    image_size: 448
 
 data:
   train:

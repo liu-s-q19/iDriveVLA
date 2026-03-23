@@ -5,7 +5,7 @@ model:
   use_cot: false
   pretrained_model_path: /data/ckpt/ReCogDrive-VLM-2B
   prompt:
-    force_action_answer_prefix: false
+    force_action_answer_prefix: true
   action_answer_protocol:
     enabled: true
   sft_model_path: /data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_ip190_2026-03-18_11-31-26/epoch=4-loss=0.8629.ckpt
@@ -32,6 +32,8 @@ model:
   video:
     min_pixels: 109760
     max_pixels: 109760
+  internvl:
+    image_size: 448
 
 data:
   train:
@@ -110,4 +112,3 @@ inference:
     temperature: 0.2
     top_k: 20
     top_p: 1.0
-

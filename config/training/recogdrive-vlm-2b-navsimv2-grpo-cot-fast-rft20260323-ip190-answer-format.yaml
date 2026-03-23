@@ -1,15 +1,14 @@
-name: recogdrive-vlm-2b-navsimv2-grpo-fast-rft20260321-reg-default-format
-description: AutoVLA GRPO fast profile on NavSim v2 canonical 8-pose; ReCogDrive-VLM-2B baseline (default-format)
+name: recogdrive-vlm-2b-navsimv2-grpo-fast-rft20260323-ip190-answer-format
+description: AutoVLA GRPO fast profile on NavSim v2 canonical 8-pose; ReCogDrive-VLM-2B baseline (answer-format) initialized from ip190 SFT epoch4
 
 model:
   use_cot: false
   pretrained_model_path: /data/ckpt/ReCogDrive-VLM-2B
   prompt:
-    force_action_answer_prefix: false
+    force_action_answer_prefix: true
   action_answer_protocol:
-    enabled: false
-  # "current reg" = latest completed standard SFT ckpt
-  sft_model_path: /data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_std_2026-03-20_16-52-00/epoch=4-loss=0.9643.ckpt
+    enabled: true
+  sft_model_path: /data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_ip190_2026-03-18_11-31-26/epoch=4-loss=0.8629.ckpt
   codebook_cache_path: "codebook_cache/agent_vocab.pkl"
   train_vision_backbone: false
   train_lm_backbone: true
@@ -28,7 +27,6 @@ model:
   tokens:
     action_start_id: 151682
     ignore_index: -100
-    # Keep ReCogDrive assistant_id triple (matches SFT config)
     assistant_id: [151644, 77091, 198]
   video:
     min_pixels: 109760

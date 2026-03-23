@@ -5,7 +5,7 @@ model:
   use_cot: false
   pretrained_model_path: /data/ckpt/Qwen/Qwen2.5-VL-3B-Instruct
   prompt:
-    force_action_answer_prefix: false
+    force_action_answer_prefix: true
   action_answer_protocol:
     enabled: true
   sft_model_path: /data/liushiqi/AutoVLA/runs/sft/navsimv2_sft8_local_8gpu_retry3_2026-03-18_09-14-56/epoch=4-loss=0.8492.ckpt
