@@ -1,6 +1,16 @@
 # NavSim v2 RFT 末尾 Action Block 方案 A
 
-状态：规划中
+状态：执行中（answer-format 协议健康度阻塞）
+
+## 当前阻塞与下一步
+- 结论（2026-03-23）：
+  - ReCogDrive answer-format 在当前 SFT 初始化下，RFT smoke 仍出现 `answer_block_valid=0`、`reward_input_valid=0`。
+  - 现阶段判断为“模型在严格规则下输出未对齐”，优先策略是先做 SFT 重新对齐，再评估 RFT 规则与奖励塑形。
+- TODO：
+  - [ ] 重新训练 ReCogDrive-VLM-2B SFT（保持 `<answer> ... trajectory ... </answer>` 真值格式完全一致）。
+  - [ ] 用新 SFT ckpt 复跑 answer-format RFT smoke（20 steps / 200 steps）。
+  - [ ] 验收指标：`answer_block_valid`、`reward_input_valid` 是否显著抬升且稳定。
+  - [ ] 若仍不达标，再执行 RFT reward 分层塑形（非 0/1 截断）方案。
 
 ## 背景
 - 当前 RFT 生成后，会从整段 `completion` 中扫描所有 `token >= action_start_id` 的 token 作为动作序列，再做截断/补齐后 decode 为轨迹并计算 reward。
