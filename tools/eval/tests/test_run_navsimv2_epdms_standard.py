@@ -7,6 +7,7 @@ import yaml
 
 import pandas as pd
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 from tools.eval import run_navsimv2_epdms_standard as mod
@@ -373,6 +374,52 @@ def test_navhard_prediction_diagnostics_falls_back_to_raw_action_tokens_when_pro
         "was_truncated": 0,
         "used_zero_fallback": 0,
     }
+
+
+def test_autovla_predict_protocol_stats_use_generated_action_count_even_when_parse_fails():
+    from models.autovla import AutoVLA
+
+    class _FakeVLM:
+        def __init__(self):
+            self.config = SimpleNamespace(model_type="qwen2_5_vl")
+
+        def generate(self, **kwargs):
+            return torch.tensor([[1, 2, 3, 101, 102, 7]], dtype=torch.long)
+
+    class _FakeProcessor:
+        def __init__(self):
+            self.tokenizer = object()
+
+        def decode(self, _):
+            return "dummy"
+
+    model = object.__new__(AutoVLA)
+    model.device = "cpu"
+    model.vlm = _FakeVLM()
+    model.processor = _FakeProcessor()
+    model.action_start_id = 100
+    model._trajectory_num_poses = 8
+    model._action_answer_protocol_enabled = True
+    model.gen_conf = {"temperature": 0.2, "top_k": 20, "top_p": 1.0, "max_new_tokens": 16}
+    model._inference_max_length = None
+    model.get_prompt = lambda _: {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)}
+    model._align_model_inputs = lambda x: x
+    model._parse_action_answer_completion = lambda _: SimpleNamespace(
+        is_valid=False,
+        invalid_reason="missing_answer_block",
+        answer_block_count=0,
+        answer_block_at_tail=False,
+        action_token_ids=[],
+        action_token_count=0,
+    )
+
+    trajectory, _ = model.predict({})
+
+    assert tuple(trajectory.shape) == (8, 3)
+    assert model._last_generation_stats["raw_action_tokens_count"] == 2
+    assert model._last_generation_stats["decoded_action_pose_count"] == 0
+    assert model._last_protocol_result["protocol_valid"] == 0
+    assert model._last_protocol_result["invalid_reason"] == "missing_answer_block"
 
 
 def test_autovla_predictor_auto_enables_lora_for_rft_checkpoint(tmp_path, monkeypatch):

@@ -267,6 +267,54 @@ class TestModelBackends(unittest.TestCase):
 
         self.assertEqual(model.img_context_token_id, 123)
 
+    def test_initialize_model_runtime_state_sets_default_pad_token_id(self):
+        from models.utils.model_backends import initialize_model_runtime_state
+
+        language_model = SimpleNamespace(generation_config=SimpleNamespace(pad_token_id=None))
+        model = SimpleNamespace(
+            config=SimpleNamespace(model_type="internvl_chat"),
+            generation_config=SimpleNamespace(pad_token_id=None),
+            language_model=language_model,
+            img_context_token_id=None,
+        )
+        processor = SimpleNamespace(
+            img_context_token="<IMG_CONTEXT>",
+            tokenizer=SimpleNamespace(
+                eos_token_id=151643,
+                pad_token_id=None,
+                convert_tokens_to_ids=lambda token: 123 if token == "<IMG_CONTEXT>" else -1,
+            ),
+        )
+
+        initialize_model_runtime_state(model, processor)
+
+        self.assertEqual(model.generation_config.pad_token_id, 151643)
+        self.assertEqual(language_model.generation_config.pad_token_id, 151643)
+
+    def test_initialize_model_runtime_state_keeps_existing_pad_token_id(self):
+        from models.utils.model_backends import initialize_model_runtime_state
+
+        language_model = SimpleNamespace(generation_config=SimpleNamespace(pad_token_id=7))
+        model = SimpleNamespace(
+            config=SimpleNamespace(model_type="internvl_chat"),
+            generation_config=SimpleNamespace(pad_token_id=9),
+            language_model=language_model,
+            img_context_token_id=None,
+        )
+        processor = SimpleNamespace(
+            img_context_token="<IMG_CONTEXT>",
+            tokenizer=SimpleNamespace(
+                eos_token_id=151643,
+                pad_token_id=5,
+                convert_tokens_to_ids=lambda token: 123 if token == "<IMG_CONTEXT>" else -1,
+            ),
+        )
+
+        initialize_model_runtime_state(model, processor)
+
+        self.assertEqual(model.generation_config.pad_token_id, 9)
+        self.assertEqual(language_model.generation_config.pad_token_id, 7)
+
     def test_maybe_wrap_with_lora_is_noop_when_disabled(self):
         from models.utils.model_backends import maybe_wrap_with_lora
 
@@ -499,6 +547,34 @@ class TestModelBackends(unittest.TestCase):
 
         completion_ids = extract_completion_ids_from_generate_output(generated_ids, prompt_ids)
 
+        self.assertTrue(torch.equal(completion_ids, generated_ids))
+
+    def test_normalize_generate_output_keeps_prefixed_outputs_unchanged(self):
+        from models.utils.model_backends import normalize_generate_output_sequences
+
+        prompt_ids = torch.tensor([[11, 12, 13]])
+        generated_ids = torch.tensor([[11, 12, 13, 21, 22]])
+
+        prompt_completion_ids, completion_ids = normalize_generate_output_sequences(
+            generated_ids,
+            prompt_ids,
+        )
+
+        self.assertTrue(torch.equal(prompt_completion_ids, generated_ids))
+        self.assertTrue(torch.equal(completion_ids, torch.tensor([[21, 22]])))
+
+    def test_normalize_generate_output_prepends_prompt_for_completion_only_outputs(self):
+        from models.utils.model_backends import normalize_generate_output_sequences
+
+        prompt_ids = torch.tensor([[11, 12, 13]])
+        generated_ids = torch.tensor([[21, 22]])
+
+        prompt_completion_ids, completion_ids = normalize_generate_output_sequences(
+            generated_ids,
+            prompt_ids,
+        )
+
+        self.assertTrue(torch.equal(prompt_completion_ids, torch.tensor([[11, 12, 13, 21, 22]])))
         self.assertTrue(torch.equal(completion_ids, generated_ids))
 
     def test_sft_messages_with_assistant_do_not_append_generation_prompt(self):

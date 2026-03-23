@@ -7,7 +7,6 @@ import argparse
 import functools
 import re
 from pathlib import Path
-from peft import get_peft_model, LoraConfig, TaskType
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -49,6 +48,7 @@ from lightning_fabric.loggers.logger import rank_zero_experiment
 from models.autovla import GRPOAutoVLA
 from models.utils.model_backends import detect_model_family
 from models.utils.model_backends import resolve_transformer_layer_classes
+from models.utils.model_backends import maybe_wrap_with_lora
 from models.utils.trainer_progress import build_tqdm_progress_bar
 from dataset_utils.rft_dataset import RFTDataset
 import datetime
@@ -413,21 +413,13 @@ if __name__ == "__main__":
     # Load the state dict
     msg = model.load_state_dict(sd, strict=False)
 
-    # Create a LoRA configuration. Adjust the parameters (r, lora_alpha, lora_dropout) as needed.
-    if config['model']['lora'].get("use", False):
+    if config['model'].get('lora', {}).get("use", False):
         print("Using LoRA mode for GRPO training.")
-        lora_conf = config['model']['lora']
-        lora_config = LoraConfig(
-            task_type=TaskType[lora_conf.get("task_type", "CAUSAL_LM")],
-            target_modules=lora_conf.get("target_modules", ["q_proj", "v_proj", "k_proj", "o_proj"]),
-            r=lora_conf.get("r", 8),
-            lora_alpha=lora_conf.get("alpha", 8),
-            lora_dropout=lora_conf.get("dropout", 0.1),
-            bias=lora_conf.get("bias", "none")
+        model.autovla.vlm, _ = maybe_wrap_with_lora(model.autovla.vlm, config['model']['lora'])
+        print(
+            "LoRA-enabled model trainable parameters:",
+            sum(p.numel() for p in model.autovla.vlm.parameters() if p.requires_grad),
         )
-        model.autovla.vlm = get_peft_model(model.autovla.vlm, lora_config)
-        print("LoRA-enabled model trainable parameters:",
-              sum(p.numel() for p in model.autovla.vlm.parameters() if p.requires_grad))
     model = model.to(torch.bfloat16)
 
     # Training

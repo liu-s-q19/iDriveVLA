@@ -26,9 +26,12 @@ from models.utils.model_backends import resize_token_embeddings_for_model
 from models.utils.model_backends import align_vision_tensor_dtypes
 from models.utils.model_backends import initialize_model_runtime_state
 from models.utils.model_backends import filter_generate_inputs_for_model
+from models.utils.model_backends import extract_static_model_inputs
+from models.utils.model_backends import filter_forward_inputs_for_model
 from models.utils.model_backends import resolve_generate_length_kwargs
 from models.utils.model_backends import get_input_ids_tensor
 from models.utils.model_backends import extract_completion_ids_from_generate_output
+from models.utils.model_backends import normalize_generate_output_sequences
 from models.utils.grpo_metrics import masked_token_mean
 from models.utils.grpo_log_keys import progress_bar_metric_names
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -196,8 +199,7 @@ class GRPOAutoVLA(pl.LightningModule):
             self.autovla.vlm, 
             sample['input_ids'], 
             sample['attention_mask'], 
-            sample['pixel_values_videos'], 
-            sample['video_grid_thw']
+            sample.get("static_model_inputs", {}),
         )
         # Get rid of the prompt (-1 because of the shift done in get_per_token_logps)
         per_token_logps = per_token_logps[:, sample['prompt_length']-1:]
@@ -209,8 +211,7 @@ class GRPOAutoVLA(pl.LightningModule):
                 self.reference_model.vlm, 
                 sample["input_ids"], 
                 sample["attention_mask"], 
-                sample["pixel_values_videos"], 
-                sample["video_grid_thw"]
+                sample.get("static_model_inputs", {}),
             )
             ref_per_token_logps = ref_per_token_logps[:, sample["prompt_length"]-1:]
 
@@ -473,11 +474,19 @@ class GRPOAutoVLA(pl.LightningModule):
 
         return reward
     
-    def get_per_token_logps(self, model, input_ids, attention_mask, pixel_values_videos, video_grid_thw):
-        # Get the per-token log probabilities for the completions for the model and the reference model
-        logits = model(input_ids, attention_mask=attention_mask, 
-                       pixel_values_videos=pixel_values_videos, 
-                       video_grid_thw=video_grid_thw).logits  # (B, L, V)
+    def get_per_token_logps(self, model, input_ids, attention_mask, static_model_inputs: dict):
+        # Get per-token log probabilities for the completions for both the policy and reference models.
+        # Vision kwargs differ across backends:
+        # - Qwen2.5-VL: pixel_values_videos + video_grid_thw
+        # - InternVL/ReCogDrive: pixel_values + image_grid_thw
+        model_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if isinstance(static_model_inputs, dict):
+            model_kwargs.update(static_model_inputs)
+        # Some InternVL/ReCogDrive backends (especially through PEFT wrappers) do not accept inputs_embeds.
+        # Ensure we never forward it from cached prompt tensors.
+        model_kwargs.pop("inputs_embeds", None)
+        model_kwargs = filter_forward_inputs_for_model(model, model_kwargs)
+        logits = model(**model_kwargs).logits  # (B, L, V)
         
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
         input_ids = input_ids[:, 1:]  # (B, L-1), exclude the first input ID since we don't have logits for it
@@ -520,6 +529,7 @@ class GRPOAutoVLA(pl.LightningModule):
         inputs = model.get_prompt(data['input_features'])
         model_inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
         model_inputs = model._align_model_inputs(model_inputs)
+        static_model_inputs = extract_static_model_inputs(model_inputs)
 
         # Generate completion
         with torch.no_grad():
@@ -528,6 +538,8 @@ class GRPOAutoVLA(pl.LightningModule):
                 "temperature": self._sample_generation_temperature['temperature'],
                 "top_k": self._sample_generation_temperature['top_k'],
                 "top_p": self._sample_generation_temperature['top_p'],
+                # Prevent empty completions when prompts accidentally end with EOS.
+                "min_new_tokens": 1,
             }
             self._seed_sampling_rng()
             gen_kwargs.update(
@@ -539,17 +551,24 @@ class GRPOAutoVLA(pl.LightningModule):
             )
 
             generate_inputs = filter_generate_inputs_for_model(model.vlm, model_inputs)
-            prompt_completion_ids = model.vlm.generate(
+            generated_ids = model.vlm.generate(
                 **generate_inputs,
                 **gen_kwargs,
             )
 
-            prompt_length = get_input_ids_tensor(inputs).size(1)
-            prompt_mask = model_inputs['attention_mask']
-            completion_ids = extract_completion_ids_from_generate_output(
-                prompt_completion_ids,
-                get_input_ids_tensor(inputs),
+            prompt_input_ids = get_input_ids_tensor(inputs).to(device=generated_ids.device)
+            prompt_completion_ids, completion_ids = normalize_generate_output_sequences(
+                generated_ids,
+                prompt_input_ids,
             )
+            prompt_length = int(prompt_input_ids.size(1))
+            prompt_mask = model_inputs['attention_mask']
+            if completion_ids.size(1) == 0 and prompt_completion_ids.size(1) > 1:
+                # Fallback: treat the last prompt token as a 1-token completion so masks stay well-formed.
+                completion_ids = prompt_completion_ids[:, -1:]
+                prompt_length = int(prompt_completion_ids.size(1) - 1)
+                prompt_mask = prompt_mask[:, :prompt_length]
+            prompt_length = max(1, int(prompt_length))
 
             # Extract action tokens and trajectory (! batch size = 1)
             raw_action_candidates = completion_ids[0][completion_ids[0] >= self.action_start_id]
@@ -609,8 +628,7 @@ class GRPOAutoVLA(pl.LightningModule):
                        'completion_ids': completion_ids,
                        'attention_mask': attention_mask,
                        'completion_mask': completion_mask,
-                       'pixel_values_videos': model_inputs['pixel_values_videos'], 
-                       'video_grid_thw': model_inputs['video_grid_thw'],
+                       'static_model_inputs': static_model_inputs,
                        'completion_preview': completion_preview,
                        'completion_text_hash': completion_text_hash,
                        'completion_ids_hash': completion_ids_hash,

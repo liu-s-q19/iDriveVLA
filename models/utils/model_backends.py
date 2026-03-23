@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable, List, Tuple
@@ -23,6 +24,7 @@ except Exception:  # pragma: no cover - exercised through runtime environment
 
 
 _INTERNVL_PRINT_FILTER_INSTALLED = False
+_CHECKPOINT_WARNING_FILTER_INSTALLED = False
 _INTERNVL_SUPPRESSED_PREFIXES = (
     "dynamic ViT batch size:",
 )
@@ -148,8 +150,72 @@ def filter_generate_inputs_for_model(vlm, model_inputs: dict) -> dict:
     filtered = dict(model_inputs)
     model_type = str(getattr(getattr(vlm, "config", None), "model_type", "")).lower()
     if model_type == "internvl_chat":
+        # InternVL's custom `.generate()` forwards kwargs to the inner language model's `.generate()`,
+        # which rejects vision-only fields like `image_flags`.
         filtered.pop("image_flags", None)
     return filtered
+
+
+def extract_static_model_inputs(model_inputs: dict) -> dict:
+    """
+    Extract non-text (mostly vision) tensors that should be forwarded alongside
+    `input_ids` / `attention_mask` for both `.generate()` and `.forward()`.
+
+    This avoids hard-coding Qwen2.5-VL-only keys (pixel_values_videos/video_grid_thw)
+    and supports InternVL/ReCogDrive (pixel_values/image_grid_thw) as well.
+    """
+    if not isinstance(model_inputs, dict):
+        return {}
+
+    static_keys = (
+        "pixel_values",
+        "pixel_values_videos",
+        "image_grid_thw",
+        "video_grid_thw",
+        "image_flags",
+    )
+    extracted = {}
+    for key in static_keys:
+        value = model_inputs.get(key)
+        if value is None:
+            continue
+        extracted[key] = value
+    return extracted
+
+
+def filter_forward_inputs_for_model(vlm, model_inputs: dict) -> dict:
+    """
+    Filter inputs to match the target model's `.forward()` signature.
+
+    This is necessary because some wrapped models (e.g., PEFT wrappers) accept
+    arbitrary kwargs and forward them to inner models that do not.
+    """
+    import inspect
+
+    if not isinstance(model_inputs, dict):
+        return {}
+
+    target = vlm
+    # PEFT models typically expose `.base_model.model` as the real implementation.
+    base_model = getattr(target, "base_model", None)
+    if base_model is not None:
+        target = getattr(base_model, "model", base_model)
+
+    forward = getattr(target, "forward", None)
+    if forward is None:
+        return dict(model_inputs)
+
+    try:
+        sig = inspect.signature(forward)
+    except (TypeError, ValueError):
+        return dict(model_inputs)
+
+    params = sig.parameters.values()
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return dict(model_inputs)
+
+    allowed = set(sig.parameters.keys())
+    return {k: v for k, v in model_inputs.items() if k in allowed}
 
 
 def resolve_generate_length_kwargs(vlm, configured_max_new_tokens=None, configured_max_length=None) -> dict:
@@ -185,6 +251,27 @@ def extract_completion_ids_from_generate_output(generated_ids: torch.Tensor, pro
     return generated_ids
 
 
+def normalize_generate_output_sequences(
+    generated_ids: torch.Tensor,
+    prompt_input_ids: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if generated_ids.ndim != 2 or prompt_input_ids.ndim != 2:
+        raise ValueError("generated_ids and prompt_input_ids must be rank-2 tensors")
+    if generated_ids.shape[0] != prompt_input_ids.shape[0]:
+        raise ValueError("generated_ids and prompt_input_ids must have the same batch dimension")
+
+    completion_ids = extract_completion_ids_from_generate_output(generated_ids, prompt_input_ids)
+    prompt_len = int(prompt_input_ids.shape[1])
+    prompt_input_ids_aligned = prompt_input_ids.to(device=generated_ids.device)
+
+    if generated_ids.shape[1] >= prompt_len and torch.equal(generated_ids[:, :prompt_len], prompt_input_ids_aligned):
+        prompt_completion_ids = generated_ids
+    else:
+        prompt_completion_ids = torch.cat([prompt_input_ids_aligned, completion_ids], dim=1)
+
+    return prompt_completion_ids, completion_ids
+
+
 def silence_internvl_runtime_prints(vlm) -> None:
     global _INTERNVL_PRINT_FILTER_INSTALLED
 
@@ -207,7 +294,75 @@ def silence_internvl_runtime_prints(vlm) -> None:
     _INTERNVL_PRINT_FILTER_INSTALLED = True
 
 
+def _install_runtime_warning_filters() -> None:
+    global _CHECKPOINT_WARNING_FILTER_INSTALLED
+
+    if _CHECKPOINT_WARNING_FILTER_INSTALLED:
+        return
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"torch\.utils\.checkpoint: the use_reentrant parameter should be passed explicitly\..*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"None of the inputs have requires_grad=True\. Gradients will be None",
+        category=UserWarning,
+    )
+    _CHECKPOINT_WARNING_FILTER_INSTALLED = True
+
+
+def _iter_generation_config_holders(vlm):
+    candidates = [
+        vlm,
+        getattr(vlm, "language_model", None),
+        getattr(vlm, "model", None),
+        getattr(vlm, "base_model", None),
+    ]
+    base_model = getattr(vlm, "base_model", None)
+    if base_model is not None:
+        candidates.append(getattr(base_model, "model", None))
+
+    seen = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        obj_id = id(candidate)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        yield candidate
+
+
+def _set_default_pad_token_id(vlm, processor) -> None:
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        return
+
+    pad_token_id = getattr(tokenizer, "pad_token_id", None)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    resolved_pad_token_id = pad_token_id if pad_token_id is not None else eos_token_id
+    if resolved_pad_token_id is None:
+        return
+
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        try:
+            tokenizer.pad_token_id = resolved_pad_token_id
+        except Exception:
+            pass
+
+    for holder in _iter_generation_config_holders(vlm):
+        generation_config = getattr(holder, "generation_config", None)
+        if generation_config is None:
+            continue
+        if getattr(generation_config, "pad_token_id", None) is None:
+            generation_config.pad_token_id = int(resolved_pad_token_id)
+
+
 def initialize_model_runtime_state(vlm, processor) -> None:
+    _install_runtime_warning_filters()
+    _set_default_pad_token_id(vlm, processor)
     silence_internvl_runtime_prints(vlm)
     if hasattr(vlm, "img_context_token_id") and getattr(vlm, "img_context_token_id", None) is None:
         img_context_token = getattr(processor, "img_context_token", None)
