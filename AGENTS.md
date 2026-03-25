@@ -122,23 +122,23 @@ RFT_CONFIG=training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-answer-fo
 bash scripts/run_rft.sh
 ```
 
-#### ReCogDrive-VLM-2B default-format（latest）
+#### ReCogDrive-VLM-2B default-format（latest, ip33）
 ```bash
 cd /data/liushiqi/AutoVLA
 CONDA_ENV=autolsqv2 \
 PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
 GPU_LIST=0,1,2,3,4,5,6,7 \
-RFT_CONFIG=training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-default-format \
+RFT_CONFIG=training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260324-ip33-epoch9-default-format-actionbook-bsz16-fullnavtrain-epoch1-lr5e5 \
 bash scripts/run_rft.sh
 ```
 
-#### ReCogDrive-VLM-2B answer-format
+#### ReCogDrive-VLM-2B answer-format（latest, ip190; aligned with ip33 default ckpt）
 ```bash
 cd /data/liushiqi/AutoVLA
 CONDA_ENV=autolsqv2 \
 PYTHON_BIN=/data/miniconda/envs/autolsqv2/bin/python \
 GPU_LIST=0,1,2,3,4,5,6,7 \
-RFT_CONFIG=training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-answer-format \
+RFT_CONFIG=training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260324-ip190-epoch9-answer-format-actionbook-bsz16-fullnavtrain-epoch1-lr5e5 \
 bash scripts/run_rft.sh
 ```
 

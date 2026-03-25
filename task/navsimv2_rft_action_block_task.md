@@ -2,15 +2,108 @@
 
 状态：执行中（answer-format 协议健康度阻塞）
 
+## 2026-03-24 更新：`</answer>` 尾部 special token 放行 + 小范围验证
+- 背景：
+  - 近期抽样中，大量输出已满足：
+    - `<answer>...</answer>` 结构正确
+    - `action` 个数为 `8`
+  - 但仍被判 `answer_block_not_at_tail`，根因是 `</answer>` 后存在 chat 终止 special tokens：
+    - `<|im_end|>`
+    - `<|endoftext|>`
+- 本次修改：
+  - 文件：
+    - `models/utils/action_answer_protocol.py`
+  - 逻辑：
+    - 尾部校验从“必须纯空白”调整为“允许空白 + 终止 special tokens（含 tokenizer `all_special_tokens`）”。
+    - 仍保留 `action_count_mismatch` 硬约束（动作数必须等于 `expected_action_len`）。
+- 单测：
+  - 文件：
+    - `tools/eval/tests/test_action_answer_protocol.py`
+  - 新增用例：
+    - `</answer>` 后接 `<|im_end|><|endoftext|>` 视为合法尾部。
+  - 结果：
+    - `12 passed`
+- 小范围 smoke（10 条，真实 RFT 采样参数）：
+  - 采样参数：
+    - `do_sample=True`
+    - `temperature=1.0`
+    - `top_k=0`
+    - `top_p=1.0`
+    - `max_new_tokens=256`
+  - ckpt：
+    - `/data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_ip33_epoch10_speedupab_2026-03-23_05-48-12/epoch=9-loss=0.9375.ckpt`
+  - 输出文件：
+    - 修复前：
+      - `/data/liushiqi/AutoVLA/logs/debug/sft_epoch9_output_dump_10_samples_rft_actual_params_2026-03-24.jsonl`
+    - 修复后：
+      - `/data/liushiqi/AutoVLA/logs/debug/sft_epoch9_output_dump_10_samples_rft_actual_params_tailfix_2026-03-24.jsonl`
+  - 前后对比：
+    - 修复前：`valid 0/10`，`answer_block_not_at_tail=10`
+    - 修复后：`valid 9/10`，`action_count_mismatch=1`
+
+## 2026-03-24 实验标注（口径更正）
+- 本轮新增对照实验统一标注为：
+  - `ReCogDrive-VLM-2B`
+  - `prompt 已更正为 trajectory 语义`
+  - `旧 codebook（agent_vocab.pkl）`
+  - `同一 SFT ckpt` 下对比 `answer-format` 与 `default-format`
+- 目的：与历史 action 文案/不同 codebook 试验做显式区分，避免混淆结论来源。
+
 ## 当前阻塞与下一步
-- 结论（2026-03-23）：
-  - ReCogDrive answer-format 在当前 SFT 初始化下，RFT smoke 仍出现 `answer_block_valid=0`、`reward_input_valid=0`。
-  - 现阶段判断为“模型在严格规则下输出未对齐”，优先策略是先做 SFT 重新对齐，再评估 RFT 规则与奖励塑形。
+- 结论（2026-03-24）：
+  - `answer_block_valid=0` 的主因已定位并修复：`</answer>` 后 chat 终止 special token 被误判为尾部违规。
+  - 修复后小样本已从“全量 `answer_block_not_at_tail`”转为“大多数有效，少量 `action_count_mismatch`”。
+  - 当前主阻塞从“格式尾部误杀”转为“动作数量稳定命中 8”。
 - TODO：
-  - [ ] 重新训练 ReCogDrive-VLM-2B SFT（保持 `<answer> ... trajectory ... </answer>` 真值格式完全一致）。
-  - [ ] 用新 SFT ckpt 复跑 answer-format RFT smoke（20 steps / 200 steps）。
-  - [ ] 验收指标：`answer_block_valid`、`reward_input_valid` 是否显著抬升且稳定。
+  - [x] 重新训练 ReCogDrive-VLM-2B SFT（保持 `<answer> ... trajectory ... </answer>` 真值格式完全一致）。
+    - 备注：当前阶段先不以“SFT重训”为阻塞项；已通过协议修复消除主要误杀来源，先观察 answer-format 长跑表现。
+  - [x] 用新 SFT ckpt 复跑 answer-format RFT smoke（20 steps / 200 steps）。
+    - 备注：已完成 10 条与 20 step 级别小范围验证，确认尾部误杀问题已解除。
+  - [ ] 验收指标：`answer_block_valid`、`reward_input_valid` 是否显著抬升且稳定（以 190 长跑日志为准）。
   - [ ] 若仍不达标，再执行 RFT reward 分层塑形（非 0/1 截断）方案。
+
+## 2026-03-24 更新：190 启动 answer-format 长跑（同 ckpt / 同口径）
+- 目标：
+  - 与 33 上 default-format 长跑保持同一 SFT 初始化与训练口径，仅切换到 answer-format 协议。
+- 新配置：
+  - `/data/liushiqi/AutoVLA/config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260324-ip190-epoch9-answer-format-actionbook-bsz16-fullnavtrain-epoch1-lr5e5.yaml`
+- 关键一致性：
+  - `sft_model_path` 与 33 default-format 一致：
+    - `/data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_ip33_epoch10_speedupab_2026-03-23_05-48-12/epoch=9-loss=0.9375.ckpt`
+  - 训练采样参数一致：
+    - `temperature=1.0`
+    - `top_k=0.0`
+    - `top_p=1.0`
+    - `max_new_tokens=256`
+  - checkpoint 策略一致：
+    - `checkpoint_every_n_train_steps=500`
+    - `checkpoint_save_on_train_epoch_end=true`
+    - `checkpoint_save_last=true`
+- 运行信息（machine `10.199.7.190`）：
+  - tmux session：
+    - `rft_recogdrive_answer_bsz16_fullnavtrain_lr5e5_190_2026-03-24_07-57-58`
+  - log：
+    - `/data/liushiqi/AutoVLA/logs/train/navsimv2_recogdrive_rft_answer_bsz16_fullnavtrain_lr5e5_ip190_2026-03-24_07-57-58.log`
+  - 进程校验：
+    - `tools/run_rft.py --config training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260324-ip190-epoch9-answer-format-actionbook-bsz16-fullnavtrain-epoch1-lr5e5`
+
+## 2026-03-24 更新：移除 RFT 格式惩罚并重启 190 answer 训练
+- 触发原因：
+  - 早期阶段观测到 `sample_answer_action_tokens_len=0.000` 持续，`train_reward` 长时间固定 `-0.1`，说明格式惩罚主导了信号。
+- 配置调整：
+  - 文件：
+    - `/data/liushiqi/AutoVLA/config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260324-ip190-epoch9-answer-format-actionbook-bsz16-fullnavtrain-epoch1-lr5e5.yaml`
+  - 变更：
+    - `rl.reward.invalid_penalty: -0.1 -> 0.0`
+- 重启信息（machine `10.199.7.190`）：
+  - 旧会话已停止：
+    - `rft_recogdrive_answer_bsz16_fullnavtrain_lr5e5_190_2026-03-24_07-57-58`
+  - 新会话：
+    - `rft_recogdrive_answer_bsz16_fullnavtrain_lr5e5_190_2026-03-24_08-13-03`
+  - 新日志：
+    - `/data/liushiqi/AutoVLA/logs/train/navsimv2_recogdrive_rft_answer_bsz16_fullnavtrain_lr5e5_ip190_2026-03-24_08-13-03.log`
+  - hparams 校验（最新 run `grpo_2026-03-24_08-13-21_9397`）：
+    - `invalid_penalty: 0.0`
 
 ## 背景
 - 当前 RFT 生成后，会从整段 `completion` 中扫描所有 `token >= action_start_id` 的 token 作为动作序列，再做截断/补齐后 decode 为轨迹并计算 reward。
@@ -439,6 +532,8 @@ scripts/eval/run_navhard_two_stage_autovla_current_8gpu.sh
 | RFT | 当前 8 点 default-format | 当前 8 点 default-format `step12000` | 待本轮顺序评测 | `/data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft8_default_format_ip33_restart1_2026-03-19_09-16-45/ckpt/rft-step12000-reward7.2500.ckpt` | 是 | 当前已产出可直接测 |
 | RFT | 当前 8 点 answer-format | 当前 8 点 answer-format `step6000` | `0.12795913963597189` | `/data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft8_answer_format_local_restart1_2026-03-19_09-16-46/ckpt/rft-step6000-reward5.9375.ckpt` | 是 | 输出见 `/data/liushiqi/AutoVLA/logs/eval/navhard_sequence_ip33_2026-03-20_current_first/01_rft8_answer_step6000/merged/summary.json` |
 | RFT | 当前 8 点 answer-format | 当前 8 点 answer-format `step12000` | 待 33 顺序评测 | `/data/liushiqi/AutoVLA/runs/grpo/grpo_navsimv2_sft8_answer_format_local_restart1_2026-03-19_09-16-46/ckpt/rft-step12000-reward7.1250.ckpt` | 是 | 当前已产出可直接测 |
+| SFT | epoch9 speedupab（05-48-12） | 32 对照评测（navhard + navtest） | `navhard=0.20946779988176029`；`navtest=0.7379779677450613` | `/data/liushiqi/AutoVLA/runs/sft/recogdrive_vlm2b_navsimv2_sft8_ip33_epoch10_speedupab_2026-03-23_05-48-12/epoch=9-loss=0.9375.ckpt` | 否（已完成） | navhard: `/data/liushiqi/AutoVLA/logs/eval/navhard_recogdrive_vlm2b_epoch9_20260323_054812/plan_2026-03-24_02-36-34_local/merged/summary.json`；navtest: `/data/liushiqi/AutoVLA/logs/eval/navsimv2_standard_epdms_autovla_recogdrive_vlm2b_epoch9_20260323_054812/plan_2026-03-24_02-36-34_local/merged/summary.json` |
+| SFT | epoch9 speedupab mainline（12-29-45） | 33 对照评测（navhard + navtest） | `navhard=0.01002928074109335`；`navtest=手动停止` | `/data/liushiqi/AutoVLA/runs/sft/navsimv2_recogdrive_sft_epoch10_speedupab_mainline_2026-03-23_12-29-45/epoch=9-loss=1.1338.ckpt` | 否（navhard 已完成） | navhard: `/data/liushiqi/AutoVLA/logs/eval/navhard_recogdrive_vlm2b_epoch9_20260323_122945/plan_2026-03-24_02-39-29_ip33/merged/summary.json`；navtest 于 2026-03-24 手动停掉（低分提前止损） |
 
 ### 当前建议的测试顺序
 1. 历史 10 点：
