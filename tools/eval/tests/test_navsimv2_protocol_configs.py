@@ -43,11 +43,19 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
             "scripts/run_sft_recogdrive_vlm2b_local8gpu.sh",
             "scripts/eval/run_navtest_epdms_standard_qwen_8gpu.sh",
             "scripts/eval/run_navtest_epdms_standard_recogdrive_vlm2b_8gpu.sh",
+            "scripts/eval/run_recogdrive_codebook_cmp_e9.sh",
         ]
 
         for rel_path in expected_scripts:
             script_path = REPO_ROOT / rel_path
             self.assertTrue(script_path.exists(), f"{rel_path} should exist")
+
+    def test_codebook_compare_launcher_defaults_to_e9_and_old_new_configs(self):
+        script = (REPO_ROOT / "scripts" / "eval" / "run_recogdrive_codebook_cmp_e9.sh").read_text(encoding="utf-8")
+        self.assertIn("epoch=9-loss=1.1338.ckpt", script)
+        self.assertIn("recogdrive-vlm-2b-navsimv2-mix-sft-local8gpu.yaml", script)
+        self.assertIn("recogdrive-vlm-2b-navsimv2-mix-sft-local8gpu-epoch10-speedupab-noprobe-20260323.yaml", script)
+        self.assertIn("--run-final-rerun", script)
 
     def test_primary_navsimv2_standard_eval_entry_uses_canonical_8_pose(self):
         cfg = _load_yaml("config/eval/navsimv2_epdms_standard.yaml")
@@ -87,7 +95,10 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
         recog = (REPO_ROOT / "scripts" / "run_sft_recogdrive_vlm2b_local8gpu.sh").read_text(encoding="utf-8")
 
         self.assertIn("training/qwen2.5-vl-3B-navsimv2-mix-sft", qwen)
-        self.assertIn("training/recogdrive-vlm-2b-navsimv2-mix-sft", recog)
+        self.assertIn(
+            "training/recogdrive-vlm-2b-navsimv2-mix-sft-local8gpu-epoch10-speedupab-noprobe-20260323",
+            recog,
+        )
 
     def test_rft_default_and_answer_configs_share_canonical_trajectory(self):
         default_cfg = _load_yaml("config/training/qwen2.5-vl-3B-navsimv2-grpo-cot-fast-rft20260312e4-default-format.yaml")
