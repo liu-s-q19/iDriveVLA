@@ -15,7 +15,7 @@ model:
     alpha: 8
     dropout: 0.1
     bias: none
-  codebook_cache_path: "codebook_cache/agent_vocab_by_instruction_k2048_n300k_2026-03-23.pkl"
+  codebook_cache_path: "codebook_cache/agent_vocab.pkl"
   action_answer_protocol:
     enabled: false
   trajectory:

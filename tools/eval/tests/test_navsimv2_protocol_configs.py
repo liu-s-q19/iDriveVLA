@@ -83,6 +83,11 @@ class TestNavSimV2ProtocolConfigs(unittest.TestCase):
         self.assertEqual(cfg["inference"]["prefetch_factor"], 2)
         self.assertEqual(cfg["model"]["internvl"]["image_size"], 448)
 
+    def test_recogdrive_noprobe_launcher_config_keeps_legacy_codebook_default(self):
+        cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-mix-sft-local8gpu-epoch10-speedupab-noprobe-20260323.yaml")
+
+        self.assertEqual(cfg["model"]["codebook_cache_path"], "codebook_cache/agent_vocab.pkl")
+
     def test_recogdrive_rft_configs_expose_explicit_internvl_resize(self):
         answer_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-answer-format.yaml")
         default_cfg = _load_yaml("config/training/recogdrive-vlm-2b-navsimv2-grpo-cot-fast-rft20260323-ip190-default-format.yaml")

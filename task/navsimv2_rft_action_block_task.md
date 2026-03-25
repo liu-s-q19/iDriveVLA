@@ -14,7 +14,7 @@
   - 文件：
     - `models/utils/action_answer_protocol.py`
   - 逻辑：
-    - 尾部校验从“必须纯空白”调整为“允许空白 + 终止 special tokens（含 tokenizer `all_special_tokens`）”。
+    - 尾部校验从“必须纯空白”调整为“允许空白 + tokenizer 全部 special tokens（`all_special_tokens`）”。
     - 仍保留 `action_count_mismatch` 硬约束（动作数必须等于 `expected_action_len`）。
 - 单测：
   - 文件：
