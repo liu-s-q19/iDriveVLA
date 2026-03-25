@@ -18,6 +18,23 @@ class ActionAnswerParseResult:
 _ACTION_TOKEN_RE = re.compile(r"<action_(\d+)>")
 
 
+def _is_allowed_tail_text(tail_text: str, tokenizer) -> bool:
+    """Allow whitespace and tokenizer special tokens after </answer>."""
+    if tail_text.strip() == "":
+        return True
+
+    allowed_tail_tokens = {"<|im_end|>", "<|endoftext|>"}
+    tokenizer_special_tokens = getattr(tokenizer, "all_special_tokens", None)
+    if isinstance(tokenizer_special_tokens, (list, tuple)):
+        allowed_tail_tokens.update(str(tok) for tok in tokenizer_special_tokens if isinstance(tok, str))
+
+    normalized = tail_text
+    for token in sorted(allowed_tail_tokens, key=len, reverse=True):
+        if token:
+            normalized = normalized.replace(token, " ")
+    return normalized.strip() == ""
+
+
 def _normalize_completion_ids(completion_ids: torch.Tensor, tokenizer) -> List[int]:
     token_ids = [int(token_id) for token_id in completion_ids.tolist()]
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
@@ -116,7 +133,7 @@ def parse_action_answer_completion(
         )
 
     close_end_char = end_char + len(answer_close)
-    answer_block_at_tail = completion_text[close_end_char:].strip() == ""
+    answer_block_at_tail = _is_allowed_tail_text(completion_text[close_end_char:], tokenizer)
     if not answer_block_at_tail:
         return ActionAnswerParseResult(
             is_valid=False,

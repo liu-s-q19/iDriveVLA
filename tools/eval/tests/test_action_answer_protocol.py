@@ -10,6 +10,7 @@ class FakeTokenizer:
     def __init__(self):
         self.eos_token_id = 999
         self.pad_token_id = 0
+        self.all_special_tokens = ["<|im_end|>", "<|endoftext|>", "<|custom_special|>"]
         self.id_to_text = {
             0: "",
             1: "<answer>",
@@ -19,6 +20,9 @@ class FakeTokenizer:
             5: "\n",
             6: "tail text",
             7: "The final output trajectory is: ",
+            8: "<|im_end|>",
+            9: "<|endoftext|>",
+            10: "<|custom_special|>",
             101: "<action_0>",
             102: "<action_1>",
             103: "<action_2>",
@@ -99,6 +103,44 @@ class TestActionAnswerProtocol(unittest.TestCase):
     def test_parse_rejects_tail_text_after_answer_block(self):
         result = parse_action_answer_completion(
             torch.tensor([1, 3, 101, 102, 103, 104, 105, 106, 107, 108, 2, 6]),
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=self.expected_action_len,
+        )
+
+        self.assertFalse(result.is_valid)
+        self.assertEqual(result.invalid_reason, "answer_block_not_at_tail")
+        self.assertFalse(result.answer_block_at_tail)
+
+    def test_parse_allows_special_end_tokens_after_answer_block(self):
+        result = parse_action_answer_completion(
+            torch.tensor([1, 3, 101, 102, 103, 104, 105, 106, 107, 108, 2, 8, 5, 9]),
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=self.expected_action_len,
+        )
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.invalid_reason, "")
+        self.assertTrue(result.answer_block_at_tail)
+        self.assertEqual(result.action_token_count, 8)
+
+    def test_parse_allows_any_tokenizer_special_tokens_after_answer_block(self):
+        result = parse_action_answer_completion(
+            torch.tensor([1, 7, 101, 102, 103, 104, 105, 106, 107, 108, 2, 10, 5, 8, 9]),
+            tokenizer=self.tokenizer,
+            action_start_id=self.action_start_id,
+            expected_action_len=self.expected_action_len,
+        )
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.invalid_reason, "")
+        self.assertTrue(result.answer_block_at_tail)
+        self.assertEqual(result.action_token_count, 8)
+
+    def test_parse_rejects_special_tokens_followed_by_plain_tail_text(self):
+        result = parse_action_answer_completion(
+            torch.tensor([1, 7, 101, 102, 103, 104, 105, 106, 107, 108, 2, 10, 5, 6]),
             tokenizer=self.tokenizer,
             action_start_id=self.action_start_id,
             expected_action_len=self.expected_action_len,
