@@ -353,6 +353,8 @@ if __name__ == "__main__":
     log_every_n_steps = max(1, int(config["training"].get("log_every_n_steps", 1)))
     progress_bar_refresh_rate = max(1, int(config["training"].get("progress_bar_refresh_rate", 10)))
     checkpoint_every_n_train_steps = max(1, int(config["training"].get("checkpoint_every_n_train_steps", 500)))
+    checkpoint_save_on_train_epoch_end = bool(config["training"].get("checkpoint_save_on_train_epoch_end", False))
+    checkpoint_save_last = bool(config["training"].get("checkpoint_save_last", False))
     save_weights_only = bool(config["training"].get("save_weights_only", False))
     resume_ckpt_path = config["training"].get("resume_ckpt_path")
     if resume_ckpt_path is not None:
@@ -381,21 +383,35 @@ if __name__ == "__main__":
     train_dataset = RFTDataset(config['data']['train'], config['model'])
     val_dataset = RFTDataset(config['data']['val'], config['model'])
 
-    train_data = StatefulDataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        num_workers=config['training']['num_workers'],
-        sampler=GroupSampler(train_dataset, shuffle=True),
-        collate_fn=train_dataset.collate_fn,
-    )
+    train_num_workers = int(config["training"]["num_workers"])
+    train_loader_kwargs = {
+        "batch_size": config["training"]["batch_size"],
+        "num_workers": train_num_workers,
+        "sampler": GroupSampler(train_dataset, shuffle=True),
+        "collate_fn": train_dataset.collate_fn,
+        "pin_memory": bool(config["training"].get("pin_memory", False)),
+    }
+    if train_num_workers > 0:
+        train_loader_kwargs["persistent_workers"] = bool(config["training"].get("persistent_workers", False))
+        if "prefetch_factor" in config["training"]:
+            train_loader_kwargs["prefetch_factor"] = int(config["training"]["prefetch_factor"])
 
-    val_data = StatefulDataLoader(
-        val_dataset,
-        batch_size=config['inference']['batch_size'],
-        num_workers=config['inference']['num_workers'],
-        shuffle=False,
-        collate_fn=val_dataset.collate_fn,
-    )    
+    train_data = StatefulDataLoader(train_dataset, **train_loader_kwargs)
+
+    val_num_workers = int(config["inference"]["num_workers"])
+    val_loader_kwargs = {
+        "batch_size": config["inference"]["batch_size"],
+        "num_workers": val_num_workers,
+        "shuffle": False,
+        "collate_fn": val_dataset.collate_fn,
+        "pin_memory": bool(config["inference"].get("pin_memory", False)),
+    }
+    if val_num_workers > 0:
+        val_loader_kwargs["persistent_workers"] = bool(config["inference"].get("persistent_workers", False))
+        if "prefetch_factor" in config["inference"]:
+            val_loader_kwargs["prefetch_factor"] = int(config["inference"]["prefetch_factor"])
+
+    val_data = StatefulDataLoader(val_dataset, **val_loader_kwargs)
 
     # Model
     model = GRPOAutoVLA(config)
@@ -489,7 +505,8 @@ if __name__ == "__main__":
             "save_policy": {
                 "every_n_train_steps": checkpoint_every_n_train_steps,
                 "save_top_k": -1,
-                "save_on_train_epoch_end": False,
+                "save_on_train_epoch_end": checkpoint_save_on_train_epoch_end,
+                "save_last": checkpoint_save_last,
                 "monitor": "train_reward",
                 "filename": "rft-step{step}-reward{train_reward:.4f}",
                 "save_weights_only": save_weights_only,
@@ -547,7 +564,8 @@ if __name__ == "__main__":
             auto_insert_metric_name=False,
             save_weights_only=save_weights_only,
             every_n_train_steps=checkpoint_every_n_train_steps,
-            save_on_train_epoch_end=False
+            save_on_train_epoch_end=checkpoint_save_on_train_epoch_end,
+            save_last=checkpoint_save_last,
         ),
         LearningRateMonitor(logging_interval="step"),
     ]

@@ -437,7 +437,8 @@ class GRPOAutoVLA(pl.LightningModule):
         device = next(self.parameters()).device
 
         if not bool(sample.get("reward_input_valid", True)):
-            reward = torch.tensor(0.0, device=device)
+            invalid_penalty = float(self.cfg.get('rl', {}).get('reward', {}).get('invalid_penalty', 0.0))
+            reward = torch.tensor(invalid_penalty, device=device)
             cot_penalties = torch.tensor(0.0, device=device, dtype=reward.dtype)
             self.log("train_reward", reward, sync_dist=True, prog_bar=("train_reward" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
             self.log("cot_penalty", cot_penalties, sync_dist=True, prog_bar=("cot_penalty" in self._progress_bar_metric_names()), on_step=True, on_epoch=False)
